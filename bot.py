@@ -1,308 +1,701 @@
-import os
 import telebot
 from telebot import types
+import os
 from flask import Flask, request
 from libsql_client import create_client
 
-# 1. БАЗОВЫЕ НАСТРОЙКИ
-def get_env(name):
-    value = os.getenv(name)
-    if not value:
-        raise EnvironmentError(f"Переменная окружения {name} обязательна")
-    return value
+# =========================
+# 🔐 НАЛАШТУВАННЯ
+# =========================
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "ТВІЙ_ТОКЕН_БОТА")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "123456789"))
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://your-app.onrender.com")
 
-TOKEN = get_env("TELEGRAM_BOT_TOKEN")
-ADMIN_ID = int(get_env("ADMIN_ID"))
-WEBHOOK_URL = get_env("WEBHOOK_URL")
-SQL_URL = get_env("SQL_URL")
-SQL_TOKEN = get_env("SQL_TOKEN")
+TURSO_URL = os.getenv("TURSO_URL", "libsql://yhbvgt65-yhbvgt65.aws-ap-northeast-1.turso.io")
+TURSO_TOKEN = os.getenv("TURSO_TOKEN", "ТВІЙ_ТОКЕН_TURSO")
+
+# =========================
+# 📊 СТАНИ КОРИСТУВАЧІВ
+# =========================
+user_states = {}
+user_form = {}
+trainer_data = {}
+admin_chats = {}
 
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
-# 2. ПОДКЛЮЧЕНИЕ К SQL
-def db():
-    if not hasattr(db, "_cl"):
-        db._cl = create_client(url=SQL_URL, auth_token=SQL_TOKEN)
-    return db._cl
+# =========================
+# 🗄️ ПІДКЛЮЧЕННЯ ДО БД (TURSO)
+# =========================
+
+client = None
+
+def init_client():
+    """Ініціалізація клієнта Turso"""
+    global client
+    try:
+        client = create_client(url=TURSO_URL, auth_token=TURSO_TOKEN)
+        print("✅ Підключення до Turso успішне")
+        return True
+    except Exception as e:
+        print(f"❌ Помилка підключення: {e}")
+        return False
+
+def get_db_client():
+    """Отримати клієнта БД"""
+    global client
+    if client is None:
+        init_client()
+    return client
 
 def init_db():
-    d = db()
-    d.execute("""
-        CREATE TABLE IF NOT EXISTS trainers (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            name TEXT NOT NULL,
-            description TEXT NOT NULL
-        )
-    """)
-
-# 3. ИНТЕРНАЛЬНЫЕ СОСТОЯНИЯ
-user_states = {}   # Для FSM выбора тренера и чатов
-user_forms = {}
-admin_chat = {}    # user_id: True -- активные чаты с админом
-
-# 4. АДМИН-ПАНЕЛЬ
-@bot.message_handler(func=lambda m: m.text == "Edit")
-def admin_panel(message):
-    if message.from_user.id != ADMIN_ID:
-        bot.send_message(message.chat.id, "❌ Доступ только для администратора")
-        return
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add("➕ Добавить пользователя", "➖ Удалить пользователя")
-    markup.add("📋 Все тренеры", "⬅️ Выйти")
-    bot.send_message(message.chat.id, "⚙️ Админ-панель", reply_markup=markup)
-    user_states[message.chat.id] = "admin_panel"
-
-@bot.message_handler(func=lambda m: m.text == "➕ Добавить пользователя")
-def admin_add_trainer_ask_username(message):
-    if message.from_user.id != ADMIN_ID: return
-    user_states[message.chat.id] = "add_trainer/username"
-    user_forms[message.chat.id] = {}
-    msg = "Введите @username тренера (начиная с @):"
-    bot.send_message(message.chat.id, msg)
-
-@bot.message_handler(func=lambda m: user_states.get(m.chat.id)=='add_trainer/username')
-def admin_add_trainer_username(message):
-    username = message.text.strip()
-    if not username.startswith("@"):
-        bot.send_message(message.chat.id, "❗️Username должен начинаться с @")
-        return
-    user_forms[message.chat.id]["username"] = username
-    user_states[message.chat.id] = "add_trainer/name"
-    bot.send_message(message.chat.id, "Введите имя тренера:")
-
-@bot.message_handler(func=lambda m: user_states.get(m.chat.id)=='add_trainer/name')
-def admin_add_trainer_name(message):
-    user_forms[message.chat.id]["name"] = message.text.strip()
-    user_states[message.chat.id] = "add_trainer/description"
-    bot.send_message(message.chat.id, "Введите описание, опыт, основные достижения:")
-
-@bot.message_handler(func=lambda m: user_states.get(m.chat.id)=='add_trainer/description')
-def admin_add_trainer_desc(message):
-    form = user_forms[message.chat.id]
-    form["description"] = message.text.strip()
+    """Ініціалізація таблиць БД"""
     try:
-        d = db()
-        d.execute(
-            "INSERT INTO trainers (username, name, description) VALUES (?, ?, ?)",
-            [form["username"], form["name"], form["description"]]
-        )
-        bot.send_message(message.chat.id, f"✅ Тренер {form['name']} добавлен!")
+        db = get_db_client()
+        if db is None:
+            print("❌ Не вдалось підключитися до БД")
+            return
+        
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS trainers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        print("✅ База даних ініціалізована")
+        
     except Exception as e:
-        msg = str(e)
-        if "UNIQUE constraint failed" in msg or "unique" in msg.lower():
-            bot.send_message(message.chat.id, "❗️Тренер с таким username уже есть.")
-        else:
-            bot.send_message(message.chat.id, "❗️Ошибка: " + msg)
-    user_states.pop(message.chat.id, None)
-    user_forms.pop(message.chat.id, None)
+        print(f"❌ Помилка ініціалізації БД: {e}")
 
-@bot.message_handler(func=lambda m: m.text == "➖ Удалить пользователя")
-def admin_delete_trainer_list(message):
-    if message.from_user.id != ADMIN_ID: return
-    d = db()
-    trainers = d.execute("SELECT id, name FROM trainers ORDER BY name").rows
-    if not trainers:
-        bot.send_message(message.chat.id, "Список тренеров пуст.")
-        return
-    markup = types.InlineKeyboardMarkup()
-    for t_id, name in trainers:
-        markup.add(types.InlineKeyboardButton(f"❌ {name}", callback_data=f"deltr_{t_id}"))
-    bot.send_message(message.chat.id, "Выберите тренера для удаления:", reply_markup=markup)
+# =========================
+# 🏁 СТАРТ БОТА
+# =========================
 
-@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("deltr_"))
-def admin_delete_trainer_confirm(call):
-    t_id = call.data.split("_")[1]
-    d = db()
-    t = d.execute("SELECT name FROM trainers WHERE id=?", [t_id]).rows
-    if t:
-        d.execute("DELETE FROM trainers WHERE id=?", [t_id])
-        bot.edit_message_text(f"Тренер {t[0][0]} удалён.", call.message.chat.id, call.message.message_id)
-    else:
-        bot.answer_callback_query(call.id, "Не найден.", show_alert=True)
-
-@bot.message_handler(func=lambda m: m.text == "📋 Все тренеры")
-def admin_list_trainers(message):
-    if message.from_user.id != ADMIN_ID: return
-    d = db()
-    trainers = d.execute("SELECT name, username, description FROM trainers ORDER BY name").rows
-    if not trainers:
-        bot.send_message(message.chat.id, "Список пуст.")
-        return
-    text = "\n".join([f"{i+1}. {n} ({u}) – {desc}" for i, (n, u, desc) in enumerate(trainers)])
-    bot.send_message(message.chat.id, text)
-
-@bot.message_handler(func=lambda m: m.text == "⬅️ Выйти")
-def admin_panel_exit(message):
-    if user_states.get(message.chat.id) == "admin_panel":
-        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-        markup.add("Выбрать тренера", "Связаться с администратором")
-        bot.send_message(message.chat.id, "Главное меню", reply_markup=markup)
-        user_states[message.chat.id] = "main_menu"
-
-# 5. ПОЛЬЗОВАТЕЛЬСКАЯ ЧАСТЬ
 @bot.message_handler(commands=['start'])
-def user_start(message):
+def start(message):
+    """Головне меню користувача"""
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add("Выбрать тренера", "Связаться с администратором")
-    bot.send_message(message.chat.id, "♟️ Добро пожаловать в шахматную школу!\nВыберите действие:", reply_markup=markup)
+    markup.add("Вибрати тренера", "Зв'язатися з адміністратором")
+    
+    bot.send_message(
+        message.chat.id,
+        "♟️ Ласкаво просимо до шахматної школи!\nВиберіть дію:",
+        reply_markup=markup
+    )
     user_states[message.chat.id] = "main_menu"
 
-@bot.message_handler(func=lambda m: m.text == "Выбрать тренера")
-def user_pick_trainer_start(message):
-    user_states[message.chat.id] = "pick_phone"
+# =========================
+# 👨‍💼 АДМІН-ПАНЕЛЬ
+# =========================
+
+@bot.message_handler(func=lambda message: message.text == "Edit")
+def admin_panel(message):
+    """Доступ до адмін-панелі (тільки для адміністратора)"""
+    if message.from_user.id != ADMIN_ID:
+        bot.send_message(message.chat.id, "❌ Немає доступу")
+        return
+    
+    user_states[message.chat.id] = "admin_panel"
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add(types.KeyboardButton("📱 Отправить телефон", request_contact=True))
-    markup.add("Отмена")
-    bot.send_message(message.chat.id, "Отправьте ваш номер телефона:", reply_markup=markup)
+    markup.add("➕ Додати тренера", "➖ Видалити тренера")
+    markup.add("📋 Список тренерів")
+    
+    bot.send_message(
+        message.chat.id,
+        "👨‍💼 Адміністраторська панель:",
+        reply_markup=markup
+    )
+
+# ===== ДОДАВАННЯ ТРЕНЕРА =====
+
+@bot.message_handler(func=lambda message: message.text == "➕ Додати тренера")
+def add_trainer_start(message):
+    """Початок процесу додавання тренера"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    user_states[message.chat.id] = "waiting_trainer_username"
+    bot.send_message(
+        message.chat.id,
+        "Введи @username тренера (з собачкою):\n(Приклад: @chess_coach_ivan)"
+    )
+
+@bot.message_handler(func=lambda message: user_states.get(message.chat.id) == "waiting_trainer_username")
+def get_trainer_username(message):
+    """Отримання username тренера"""
+    username = message.text.strip()
+    
+    if not username.startswith("@"):
+        bot.send_message(message.chat.id, "❌ Username має починатися з @\nПопробуй ще раз:")
+        return
+    
+    trainer_data[message.chat.id] = {"username": username}
+    user_states[message.chat.id] = "waiting_trainer_name"
+    bot.send_message(message.chat.id, "Введи ім'я тренера:")
+
+@bot.message_handler(func=lambda message: user_states.get(message.chat.id) == "waiting_trainer_name")
+def get_trainer_name(message):
+    """Отримання імені тренера"""
+    trainer_data[message.chat.id]["name"] = message.text
+    user_states[message.chat.id] = "waiting_trainer_description"
+    bot.send_message(message.chat.id, "Введи опис тренера (досвід, кваліфікація тощо):")
+
+@bot.message_handler(func=lambda message: user_states.get(message.chat.id) == "waiting_trainer_description")
+def get_trainer_description(message):
+    """Отримання опису та збереження тренера в БД"""
+    trainer_data[message.chat.id]["description"] = message.text
+    data = trainer_data[message.chat.id]
+    
+    try:
+        db = get_db_client()
+        if db is None:
+            bot.send_message(message.chat.id, "❌ Помилка підключення до БД")
+            return
+        
+        db.execute(
+            "INSERT INTO trainers (username, name, description) VALUES (?, ?, ?)",
+            [data["username"], data["name"], data["description"]]
+        )
+        
+        bot.send_message(
+            message.chat.id,
+            f"✅ Тренер {data['name']} успішно додан!"
+        )
+        
+    except Exception as e:
+        error_str = str(e)
+        if "UNIQUE constraint failed" in error_str or "unique" in error_str.lower():
+            bot.send_message(
+                message.chat.id,
+                f"❌ Тренер з username {data['username']} уже існує"
+            )
+        else:
+            bot.send_message(message.chat.id, f"❌ Помилка: {e}")
+    
+    user_states.pop(message.chat.id, None)
+    trainer_data.pop(message.chat.id, None)
+
+# ===== ВИДАЛЕННЯ ТРЕНЕРА =====
+
+@bot.message_handler(func=lambda message: message.text == "➖ Видалити тренера")
+def delete_trainer_start(message):
+    """Показ списку тренерів для видалення"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    try:
+        db = get_db_client()
+        if db is None:
+            bot.send_message(message.chat.id, "❌ Помилка підключення до БД")
+            return
+        
+        result = db.execute("SELECT id, name FROM trainers ORDER BY name")
+        trainers = result.rows if hasattr(result, 'rows') else []
+        
+        if not trainers:
+            bot.send_message(message.chat.id, "📭 Список тренерів порожній")
+            return
+        
+        markup = types.InlineKeyboardMarkup()
+        
+        for trainer in trainers:
+            trainer_id = trainer[0]
+            name = trainer[1]
+            btn = types.InlineKeyboardButton(
+                text=f"❌ {name}",
+                callback_data=f"delete_trainer_{trainer_id}"
+            )
+            markup.add(btn)
+        
+        bot.send_message(message.chat.id, "Вибери тренера для видалення:", reply_markup=markup)
+        
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ Помилка: {e}")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("delete_trainer_"))
+def delete_trainer_confirm(call):
+    """Видалення тренера"""
+    if call.from_user.id != ADMIN_ID:
+        bot.answer_callback_query(call.id, "❌ Немає доступу", show_alert=True)
+        return
+    
+    trainer_id = call.data.split("_")[2]
+    
+    try:
+        db = get_db_client()
+        if db is None:
+            bot.answer_callback_query(call.id, "❌ Помилка підключення", show_alert=True)
+            return
+        
+        result = db.execute("SELECT name FROM trainers WHERE id = ?", [trainer_id])
+        trainer = result.rows[0] if (hasattr(result, 'rows') and result.rows) else None
+        
+        if not trainer:
+            bot.answer_callback_query(call.id, "❌ Тренер не знайдений", show_alert=True)
+            return
+        
+        db.execute("DELETE FROM trainers WHERE id = ?", [trainer_id])
+        
+        bot.answer_callback_query(call.id, "✅ Видалено!", show_alert=False)
+        bot.edit_message_text(
+            f"✅ Тренер '{trainer[0]}' видалений із системи",
+            call.message.chat.id,
+            call.message.message_id
+        )
+        
+    except Exception as e:
+        bot.answer_callback_query(call.id, f"❌ Помилка: {e}", show_alert=True)
+
+# ===== СПИСОК ТРЕНЕРІВ =====
+
+@bot.message_handler(func=lambda message: message.text == "📋 Список тренерів")
+def list_trainers(message):
+    """Показ усіх тренерів"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    try:
+        db = get_db_client()
+        if db is None:
+            bot.send_message(message.chat.id, "❌ Помилка підключення до БД")
+            return
+        
+        result = db.execute("SELECT id, name, username, description FROM trainers ORDER BY name")
+        trainers = result.rows if hasattr(result, 'rows') else []
+        
+        if not trainers:
+            bot.send_message(message.chat.id, "📭 Список тренерів порожній")
+            return
+        
+        text = "📋 **Список тренерів:**\n\n"
+        for idx, trainer in enumerate(trainers, 1):
+            name = trainer[1]
+            username = trainer[2]
+            desc = trainer[3] or "Немає опису"
+            text += f"{idx}. **{name}** ({username})\n"
+            text += f"   _{desc}_\n\n"
+        
+        bot.send_message(message.chat.id, text, parse_mode="Markdown")
+        
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ Помилка: {e}")
+
+# =========================
+# 👤 ВИБІР ТРЕНЕРА (КОРИСТУВАЧ)
+# =========================
+
+@bot.message_handler(func=lambda message: message.text == "Вибрати тренера")
+def choose_trainer_start(message):
+    """Початок процесу вибору тренера"""
+    user_states[message.chat.id] = "waiting_phone"
+    
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    btn = types.KeyboardButton("📱 Надіслати номер", request_contact=True)
+    markup.add(btn)
+    
+    bot.send_message(
+        message.chat.id,
+        "Поділись своїм номером телефону:",
+        reply_markup=markup
+    )
 
 @bot.message_handler(content_types=['contact'])
-def user_pick_trainer_phone(message):
-    if user_states.get(message.chat.id) != "pick_phone":
+def get_phone(message):
+    """Отримання номера телефону"""
+    if user_states.get(message.chat.id) != "waiting_phone":
         return
-    user_forms[message.chat.id] = {"phone": message.contact.phone_number}
-    user_states[message.chat.id] = "pick_name"
+    
+    user_form[message.chat.id] = {}
+    user_form[message.chat.id]["phone"] = message.contact.phone_number
+    
+    user_states[message.chat.id] = "waiting_user_name"
+    
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add("Отмена")
-    bot.send_message(message.chat.id, "Введите ваше имя:", reply_markup=markup)
+    markup.add("◀️ Скасувати")
+    
+    bot.send_message(
+        message.chat.id,
+        "Спасибі! Тепер введи своє ім'я:",
+        reply_markup=markup
+    )
 
-@bot.message_handler(func=lambda m: user_states.get(m.chat.id) == "pick_name")
-def user_pick_trainer_name(message):
-    if message.text == "Отмена":
-        user_forms.pop(message.chat.id, None)
-        user_states[message.chat.id] = "main_menu"
-        user_start(message)
+@bot.message_handler(func=lambda message: user_states.get(message.chat.id) == "waiting_user_name")
+def get_user_name(message):
+    """Отримання імені користувача"""
+    if message.text == "◀️ Скасувати":
+        cancel_selection(message)
         return
-    user_forms[message.chat.id]["name"] = message.text.strip()
-    user_states[message.chat.id] = "pick_level"
-    bot.send_message(message.chat.id, "Опишите ваш уровень (например: Начинающий, Средний, Продвинутый):")
+    
+    user_form[message.chat.id]["name"] = message.text
+    user_states[message.chat.id] = "waiting_level"
+    
+    bot.send_message(
+        message.chat.id,
+        "Опиши свій рівень гри в шахи:\n(Наприклад: Початківець, Середній, Продвинутий)"
+    )
 
-@bot.message_handler(func=lambda m: user_states.get(m.chat.id) == "pick_level")
-def user_pick_trainer_level(message):
-    if message.text == "Отмена":
-        user_forms.pop(message.chat.id, None)
-        user_states[message.chat.id] = "main_menu"
-        user_start(message)
+@bot.message_handler(func=lambda message: user_states.get(message.chat.id) == "waiting_level")
+def get_level(message):
+    """Отримання рівня та показ списку тренерів"""
+    if message.text == "◀️ Скасувати":
+        cancel_selection(message)
         return
-    user_forms[message.chat.id]["level"] = message.text.strip()
-    # список тренеров
-    d = db()
-    trainers = d.execute("SELECT id, name FROM trainers ORDER BY name").rows
-    if not trainers:
-        bot.send_message(message.chat.id, "Нет доступных тренеров. Попробуйте позже.")
-        user_states[message.chat.id] = "main_menu"
-        user_start(message)
-        return
-    markup = types.InlineKeyboardMarkup()
-    for t_id, name in trainers:
-        markup.add(types.InlineKeyboardButton(f"👨‍🏫 {name}", callback_data=f"chtr_{t_id}"))
-    bot.send_message(message.chat.id, "Выберите вашего тренера:", reply_markup=markup)
-    user_states[message.chat.id] = "pick_trainer"
-
-@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("chtr_"))
-def user_pick_trainer_send_to_trainer(call):
-    t_id = call.data.split("_")[1]
-    d = db()
-    trainer = d.execute("SELECT username, name FROM trainers WHERE id=?", [t_id]).rows
-    form = user_forms.get(call.message.chat.id)
-    if not trainer or not form:
-        bot.answer_callback_query(call.id, "Ошибка, попробуйте заново", show_alert=True)
-        return
-    username, t_name = trainer[0]
-    # Отправляем тренеру!
+    
+    user_form[message.chat.id]["level"] = message.text
+    
     try:
-        text = (f"🎯 Новая заявка!\n\n"
-                f"👤 Имя: {form['name']}\n"
-                f"📱 Телефон: {form['phone']}\n"
-                f"♟️ Уровень: {form['level']}\n")
-        bot.send_message(username, text)
-        bot.answer_callback_query(call.id, "Заявка отправлена!", show_alert=False)
-    except Exception:
-        bot.send_message(call.message.chat.id, "⚠️ Не удалось отправить тренеру (он должен начать чат с ботом).")
+        db = get_db_client()
+        if db is None:
+            bot.send_message(message.chat.id, "❌ Помилка підключення до БД")
+            cancel_selection(message)
+            return
+        
+        result = db.execute("SELECT id, name, description FROM trainers ORDER BY name")
+        trainers = result.rows if hasattr(result, 'rows') else []
+        
+        if not trainers:
+            bot.send_message(
+                message.chat.id,
+                "❌ На жаль, зараз немає доступних тренерів. Спробуй пізніше."
+            )
+            cancel_selection(message)
+            return
+        
+        markup = types.InlineKeyboardMarkup()
+        
+        for trainer in trainers:
+            trainer_id = trainer[0]
+            name = trainer[1]
+            btn = types.InlineKeyboardButton(
+                text=f"👨‍🏫 {name}",
+                callback_data=f"choose_trainer_{trainer_id}"
+            )
+            markup.add(btn)
+        
+        bot.send_message(
+            message.chat.id,
+            "Вибери свого тренера:",
+            reply_markup=markup
+        )
+        user_states[message.chat.id] = "trainer_selected"
+        
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ Помилка: {e}")
+        cancel_selection(message)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("choose_trainer_"))
+def send_request_to_trainer(call):
+    """Надіслання заявки вибраному тренеру"""
+    trainer_id = call.data.split("_")[2]
+    
+    try:
+        db = get_db_client()
+        if db is None:
+            bot.answer_callback_query(call.id, "❌ Помилка підключення", show_alert=True)
+            return
+        
+        result = db.execute(
+            "SELECT username, name FROM trainers WHERE id = ?",
+            [trainer_id]
+        )
+        trainer = result.rows[0] if (hasattr(result, 'rows') and result.rows) else None
+        
+        if not trainer:
+            bot.answer_callback_query(call.id, "❌ Тренер не знайдений", show_alert=True)
+            return
+        
+        username, trainer_name = trainer
+        data = user_form.get(call.message.chat.id)
+        
+        if not data:
+            bot.answer_callback_query(call.id, "❌ Помилка даних", show_alert=True)
+            return
+        
+        # Надіслання повідомлення тренеру
+        notification_text = f"""
+🎯 **Нова заявка на заняття!**
+
+👤 **Ім'я:** {data['name']}
+📱 **Телефон:** {data['phone']}
+♟️ **Рівень:** {data['level']}
+
+Тренер, зв'яжись з учнем!
+        """
+        
+        try:
+            bot.send_message(username, notification_text, parse_mode="Markdown")
+            bot.answer_callback_query(call.id, "✅ Заявка надіслана тренеру!", show_alert=False)
+        except Exception as e:
+            bot.send_message(
+                call.message.chat.id,
+                f"⚠️ Не вдалось надіслати заявку тренеру. Перевір контакти адміністратора."
+            )
+        
+        # Підтвердження користувачу
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.add("Вибрати іншого тренера", "Зв'язатися з адміністратором")
+        
+        bot.edit_message_text(
+            f"✅ Твоя заявка надіслана тренеру {trainer_name}!\nВін зв'яжеться з тобою найближчим часом.",
+            call.message.chat.id,
+            call.message.message_id
+        )
+        
+        bot.send_message(
+            call.message.chat.id,
+            "Що дальше?",
+            reply_markup=markup
+        )
+        
+        # Очистка даних
+        user_states.pop(call.message.chat.id, None)
+        user_form.pop(call.message.chat.id, None)
+        
+    except Exception as e:
+        bot.answer_callback_query(call.id, f"❌ Помилка: {e}", show_alert=True)
+
+def cancel_selection(message):
+    """Скасування вибору тренера"""
+    user_states.pop(message.chat.id, None)
+    user_form.pop(message.chat.id, None)
+    
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add("Вибрати тренера", "Зв'язатися з адміністратором")
+    
+    bot.send_message(message.chat.id, "Скасовано. Головне меню:", reply_markup=markup)
+
+# =========================
+# 💬 ЧАТ З АДМІНІСТРАТОРОМ
+# =========================
+
+@bot.message_handler(func=lambda message: message.text == "Зв'язатися з адміністратором")
+def contact_admin_start(message):
+    """Ініціація чату з адміністратором"""
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add("🛑 Завершити чат")
+    
+    bot.send_message(
+        message.chat.id,
+        "⏳ Очікуй відповіді адміністратора...\nАдміністратор скоро з вами зв'яжеться!",
+        reply_markup=markup
+    )
+    
+    user_states[message.chat.id] = "waiting_admin_response"
+    
+    # Надіслання повідомлення адміністратору
+    admin_markup = types.InlineKeyboardMarkup()
+    admin_markup.add(
+        types.InlineKeyboardButton(
+            "✅ Прийняти чат",
+            callback_data=f"accept_chat_{message.chat.id}"
+        )
+    )
+    admin_markup.add(
+        types.InlineKeyboardButton(
+            "❌ Відхилити",
+            callback_data=f"reject_chat_{message.chat.id}"
+        )
+    )
+    
+    user_info = f"@{message.from_user.username}" if message.from_user.username else f"ID: {message.chat.id}"
+    
+    bot.send_message(
+        ADMIN_ID,
+        f"📞 **Запит на чат від користувача**\n\nКористувач: {user_info}\nІм'я: {message.from_user.first_name}",
+        reply_markup=admin_markup,
+        parse_mode="Markdown"
+    )
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("accept_chat_"))
+def accept_chat(call):
+    """Адміністратор приймає чат"""
+    user_id = int(call.data.split("_")[2])
+    
+    if user_id in admin_chats:
+        bot.answer_callback_query(call.id, "⚠️ Чат уже активний з іншим адміном", show_alert=True)
+        return
+    
+    admin_chats[user_id] = call.from_user.id
+    user_states[user_id] = "in_admin_chat"
+    
     bot.edit_message_text(
-        f"✅ Заявка отправлена тренеру {t_name}!\nОн свяжется с вами в ближайшее время.",
+        "✅ Чат прийнято! Починаємо спілкування.",
         call.message.chat.id,
         call.message.message_id
     )
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add("Выбрать тренера", "Связаться с администратором")
-    bot.send_message(call.message.chat.id, "Что дальше?", reply_markup=markup)
-    user_states[call.message.chat.id] = "main_menu"
-    user_forms.pop(call.message.chat.id, None)
+    
+    try:
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.add("🛑 Завершити чат")
+        
+        bot.send_message(
+            user_id,
+            "✅ Адміністратор прийняв вашу заявку!\n💬 Тепер ви можете спілкуватися з ним напряму.",
+            reply_markup=markup
+        )
+    except:
+        pass
 
-# 6. ЧАТ С АДМИНИСТРАТОРОМ
-@bot.message_handler(func=lambda m: m.text == "Связаться с администратором")
-def user_contact_admin_start(message):
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add("❌ Завершить чат")
-    bot.send_message(message.chat.id, "Ожидайте ответа администратора.", reply_markup=markup)
-    user_states[message.chat.id] = "wait_admin"
-    # Администратору сообщение:
-    admin_markup = types.InlineKeyboardMarkup()
-    admin_markup.add(types.InlineKeyboardButton("✅ Принять чат", callback_data=f"accchat_{message.chat.id}"))
-    admin_markup.add(types.InlineKeyboardButton("❌ Отклонить", callback_data=f"rejchat_{message.chat.id}"))
-    bot.send_message(ADMIN_ID,
-        f"💬 Запрос на чат: пользователь {message.chat.id}",
-        reply_markup=admin_markup)
-
-@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("accchat_"))
-def admin_chat_accept(call):
-    user_id = int(call.data.split("_")[1])
-    admin_chat[user_id] = True
-    user_states[user_id] = "chat_with_admin"
-    bot.send_message(user_id, "✅ Админ в чате! Можете общаться.\nНажмите ❌ Завершить чат для выхода.")
-
-    bot.edit_message_text("Чат с пользователем начат.", call.message.chat.id, call.message.message_id)
-
-@bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("rejchat_"))
-def admin_chat_reject(call):
-    user_id = int(call.data.split("_")[1])
-    bot.send_message(user_id, "❌ Ваш чат с админом отклонён.")
+@bot.callback_query_handler(func=lambda call: call.data.startswith("reject_chat_"))
+def reject_chat(call):
+    """Адміністратор відхиляє чат"""
+    user_id = int(call.data.split("_")[2])
+    
+    bot.edit_message_text(
+        "❌ Чат відхилений.",
+        call.message.chat.id,
+        call.message.message_id
+    )
+    
     user_states[user_id] = "main_menu"
-    user_start(types.SimpleNamespace(chat=types.SimpleNamespace(id=user_id)))
-    bot.edit_message_text("Чат отклонён.", call.message.chat.id, call.message.message_id)
+    
+    try:
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.add("Вибрати тренера", "Зв'язатися з адміністратором")
+        
+        bot.send_message(
+            user_id,
+            "❌ Адміністратор відхилив вашу заявку. Спробуй пізніше.",
+            reply_markup=markup
+        )
+    except:
+        pass
 
-@bot.message_handler(func=lambda m: user_states.get(m.chat.id) == "chat_with_admin")
-def relay_to_admin(message):
-    if message.text == "❌ Завершить чат":
-        admin_chat.pop(message.chat.id, None)
-        user_states[message.chat.id] = "main_menu"
-        user_start(message)
-        bot.send_message(ADMIN_ID, f"Пользователь {message.chat.id} завершил чат.")
+@bot.message_handler(func=lambda message: message.text == "🛑 Завершити чат")
+def end_chat(message):
+    """Завершення чату (користувач або адміністратор)"""
+    if message.chat.id in admin_chats:
+        admin_id = admin_chats[message.chat.id]
+        
+        bot.send_message(
+            message.chat.id,
+            "👋 Чат завершено. Спасибі за звернення!"
+        )
+        
+        try:
+            bot.send_message(
+                admin_id,
+                f"👤 Користувач завершив чат (ID: {message.chat.id})"
+            )
+        except:
+            pass
+        
+        admin_chats.pop(message.chat.id, None)
+    elif message.from_user.id == ADMIN_ID:
+        # Адміністратор завершує чат
+        user_id = None
+        for uid, aid in admin_chats.items():
+            if aid == message.from_user.id:
+                user_id = uid
+                break
+        
+        if user_id:
+            try:
+                bot.send_message(user_id, "👋 Адміністратор завершив чат.")
+            except:
+                pass
+            admin_chats.pop(user_id, None)
+        else:
+            bot.send_message(message.chat.id, "❌ Немає активного чату")
+            return
+    
+    user_states[message.chat.id] = "main_menu"
+    
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add("Вибрати тренера", "Зв'язатися з адміністратором")
+    bot.send_message(message.chat.id, "Головне меню:", reply_markup=markup)
+
+@bot.message_handler(func=lambda message: message.chat.id in admin_chats and user_states.get(message.chat.id) == "in_admin_chat")
+def relay_user_message(message):
+    """Пересилання повідомлення від користувача до адміна"""
+    if message.text == "🛑 Завершити чат":
+        end_chat(message)
         return
-    bot.send_message(ADMIN_ID, f"👤 {message.chat.id}: {message.text}")
+    
+    admin_id = admin_chats[message.chat.id]
+    
+    try:
+        bot.send_message(
+            admin_id,
+            f"💬 Повідомлення від користувача:\n\n{message.text}"
+        )
+    except:
+        pass
 
-@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and any(admin_chat.values()))
-def relay_from_admin(message):
-    # Отсылает только в активный юзер-чат
-    for user_id in list(admin_chat.keys()):
-        bot.send_message(user_id, f"Админ: {message.text}")
+@bot.message_handler(func=lambda message: message.from_user.id == ADMIN_ID)
+def relay_admin_message(message):
+    """Пересилання повідомлення від адміна до користувача"""
+    if message.text == "🛑 Завершити чат":
+        end_chat(message)
+        return
+    
+    user_id = None
+    for uid, aid in admin_chats.items():
+        if aid == message.from_user.id:
+            user_id = uid
+            break
+    
+    if not user_id:
+        bot.send_message(message.chat.id, "❌ Немає активного чату")
+        return
+    
+    try:
+        bot.send_message(
+            user_id,
+            f"💬 Адміністратор:\n\n{message.text}"
+        )
+    except:
+        bot.send_message(message.chat.id, f"❌ Не вдалось надіслати повідомлення користувачу")
 
-@bot.message_handler(func=lambda m: m.from_user.id == ADMIN_ID and m.text == "❌ Завершить чат")
-def admin_chat_end(message):
-    for user_id in list(admin_chat.keys()):
-        bot.send_message(user_id, "Чат с администратором завершён.")
-        user_states[user_id] = "main_menu"
-        admin_chat.pop(user_id, None)
-        user_start(types.SimpleNamespace(chat=types.SimpleNamespace(id=user_id)))
-    bot.send_message(ADMIN_ID, "Чат(ы) завершены.")
+# =========================
+# 🌐 FLASK WEBHOOK ENDPOINTS
+# =========================
 
-# 7. FLASK (Render webhooks)
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    update = telebot.types.Update.de_json(request.get_json(force=True))
-    bot.process_new_updates([update])
+    """Telegram webhook handler"""
+    try:
+        json_data = request.get_json()
+        update = telebot.types.Update.de_json(json_data)
+        bot.process_new_updates([update])
+    except Exception as e:
+        print(f"❌ Помилка обробки webhook: {e}")
     return '', 200
 
-@app.route("/health", methods=['GET'])
-def health(): return "OK", 200
+@app.route('/health', methods=['GET'])
+def health():
+    """Health check для Render"""
+    return 'OK', 200
 
-# 8. ЗАПУСК
+# =========================
+# 🚀 ЗАПУСК БОТА
+# =========================
+
 if __name__ == "__main__":
-    print("Запуск Chess bot...")
+    print("🚀 Бот запускається...")
     init_db()
-    try: bot.remove_webhook()
-    except: pass
-    bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT",5000)), debug=False)
+    
+    # Видалити старий webhook
+    try:
+        bot.remove_webhook()
+        print("✅ Старий webhook видалено")
+    except:
+        pass
+    
+    # Встановити новий webhook
+    webhook_url = f"{WEBHOOK_URL}/webhook"
+    try:
+        bot.set_webhook(url=webhook_url)
+        print(f"✅ Webhook встановлено: {webhook_url}")
+    except Exception as e:
+        print(f"⚠️ Помилка встановлення webhook: {e}")
+    
+    # Запустити Flask додаток
+    port = int(os.getenv("PORT", 5000))
+    print(f"🌐 Запуск Flask на порту {port}...")
+    app.run(host='0.0.0.0', port=port, debug=False)
