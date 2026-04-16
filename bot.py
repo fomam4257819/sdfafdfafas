@@ -129,81 +129,86 @@ class TursoClient:
         try:
             stmt = {"sql": query}
             if args:
-                stmt["args"] = [
-                    {"type": "text", "value": str(a)} if not isinstance(a, (int, float)) or a is None
-                    else {"type": "integer", "value": a} if isinstance(a, int)
-                    else {"type": "float", "value": a}
-                    for a in args
-                ]
-            
+                # Turso вимагає value завжди як рядок
+                turso_args = []
+                for a in args:
+                    if a is None:
+                        turso_args.append({"type": "null", "value": None})
+                    elif isinstance(a, bool):
+                        turso_args.append({"type": "integer", "value": str(int(a))})
+                    elif isinstance(a, int):
+                        turso_args.append({"type": "integer", "value": str(a)})
+                    elif isinstance(a, float):
+                        turso_args.append({"type": "float", "value": str(a)})
+                    else:
+                        turso_args.append({"type": "text", "value": str(a)})
+                stmt["args"] = turso_args
+
             payload = {
                 "requests": [
-                    {
-                        "type": "execute",
-                        "stmt": stmt
-                    }
+                    {"type": "execute", "stmt": stmt},
+                    {"type": "close"}
                 ]
             }
-            
+
             url = f"{self.url}/v2/pipeline"
-            logger.info(f"📡 SQL: {query[:100]}...")
-            
+            logger.info(f"📡 SQL: {query[:120]}")
+
             response = requests.post(
                 url,
                 json=payload,
                 headers=self.headers,
                 timeout=10
             )
-            
-            logger.debug(f"Status: {response.status_code}")
-            
+
+            logger.debug(f"HTTP status: {response.status_code}")
+
             if response.status_code != 200:
                 error_msg = f"DB Error ({response.status_code}): {response.text[:300]}"
                 logger.error(f"❌ {error_msg}")
                 raise Exception(error_msg)
-            
+
             result = response.json()
-            logger.debug(f"Full response: {json.dumps(result, default=str)[:500]}")
-            
-            # Проверяем структуру ответа
-            if not isinstance(result, dict) or "results" not in result:
-                logger.warning(f"⚠️ Unexpected response: {list(result.keys()) if isinstance(result, dict) else type(result)}")
-                return QueryResult([])
-            
+            # Логуємо повну відповідь для налагодження
+            logger.info(f"📥 RAW response: {json.dumps(result, default=str)[:800]}")
+
+            # Turso /v2/pipeline повертає: {"results": [{"type": "ok", "response": {...}}, ...]}
             results = result.get("results", [])
-            if not results or len(results) == 0:
-                logger.warning(f"⚠️ Empty results")
+            if not results:
+                logger.warning("⚠️ Empty results array")
                 return QueryResult([])
-            
-            result_data = results[0]
-            logger.debug(f"result_data keys: {list(result_data.keys()) if isinstance(result_data, dict) else type(result_data)}")
-            
-            # Проверяем ошибку
-            error = result_data.get("error")
-            if error:
-                logger.error(f"❌ DB Error: {error}")
-                raise Exception(f"DB Error: {error}")
-            
-            # Получаем response объект
-            response_obj = result_data.get("response")
-            if response_obj is None:
-                logger.debug(f"⚠️ No response object, INSERT/UPDATE/DELETE success")
-                return QueryResult([])
-            
-            logger.debug(f"response_obj type: {type(response_obj)}, keys: {list(response_obj.keys()) if isinstance(response_obj, dict) else 'not dict'}")
-            
-            # Получаем rows
-            if isinstance(response_obj, dict):
+
+            first = results[0]
+
+            # Перевірка на помилку
+            if first.get("type") == "error":
+                err = first.get("error", {})
+                msg = err.get("message", str(err)) if isinstance(err, dict) else str(err)
+                logger.error(f"❌ DB Error: {msg}")
+                raise Exception(f"DB Error: {msg}")
+
+            # Успішна відповідь
+            response_obj = first.get("response", {})
+            result_inner = response_obj.get("result", {}) if isinstance(response_obj, dict) else {}
+
+            # Спочатку пробуємо result_inner.rows (стандарт v2)
+            rows = None
+            if isinstance(result_inner, dict):
+                rows = result_inner.get("rows")
+                logger.debug(f"result_inner keys: {list(result_inner.keys())}, rows count: {len(rows) if rows is not None else 'None'}")
+
+            # Запасний варіант: rows прямо в response_obj
+            if rows is None and isinstance(response_obj, dict):
                 rows = response_obj.get("rows")
-                logger.debug(f"rows: type={type(rows)}, len={len(rows) if rows else 0}")
-                
-                if rows is not None:  # Может быть пустой список []
-                    logger.info(f"✅ SELECT: {len(rows)} rows")
-                    return QueryResult(rows)
-            
-            logger.debug(f"No rows in response, returning empty")
+
+            if rows is not None:
+                logger.info(f"✅ SELECT: {len(rows)} rows")
+                return QueryResult(rows)
+
+            # INSERT/UPDATE/DELETE — rows немає, це нормально
+            logger.debug("No rows (INSERT/UPDATE/DELETE or empty SELECT)")
             return QueryResult([])
-            
+
         except Exception as e:
             logger.error(f"❌ Query error: {e}", exc_info=True)
             raise
@@ -920,7 +925,45 @@ def webhook():
         logger.error(f"❌ Webhook: {e}")
     return '', 200
 
-@app.route('/health', methods=['GET'])
+@app.route('/debug', methods=['GET'])
+def debug_db():
+    """Діагностика БД — показує сирий відповідь Turso і список тренерів"""
+    try:
+        import json as _json
+
+        # 1. Сирий запит до Turso
+        payload = {
+            "requests": [
+                {"type": "execute", "stmt": {"sql": "SELECT id, name, username, description FROM trainers"}},
+                {"type": "close"}
+            ]
+        }
+        headers = {
+            "Authorization": f"Bearer {TURSO_TOKEN}",
+            "Content-Type": "application/json"
+        }
+        raw = requests.post(f"{TURSO_URL}/v2/pipeline", json=payload, headers=headers, timeout=10)
+        raw_json = raw.json()
+
+        # 2. Через наш клієнт
+        db = get_db_client()
+        parsed_rows = []
+        if db:
+            try:
+                result = db.execute("SELECT id, name, username, description FROM trainers")
+                parsed_rows = [list(r) for r in result.rows]
+            except Exception as e:
+                parsed_rows = [f"ERROR: {e}"]
+
+        return _json.dumps({
+            "http_status": raw.status_code,
+            "raw_turso_response": raw_json,
+            "parsed_rows": parsed_rows
+        }, ensure_ascii=False, indent=2), 200, {"Content-Type": "application/json"}
+    except Exception as e:
+        return _json.dumps({"error": str(e)}, ensure_ascii=False), 500
+
+
 def health():
     """Health"""
     try:
