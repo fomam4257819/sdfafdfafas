@@ -9,7 +9,7 @@ from libsql_client import create_client
 # =========================
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "ТВІЙ_ТОКЕН_БОТА")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "123456789"))
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://your-app.onrender.com")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://78655.onrender.com")
 
 TURSO_URL = os.getenv("TURSO_URL", "libsql://yhbvgt65-yhbvgt65.aws-ap-northeast-1.turso.io")
 TURSO_TOKEN = os.getenv("TURSO_TOKEN", "ТВІЙ_ТОКЕН_TURSO")
