@@ -4,9 +4,9 @@ import os
 import logging
 import json
 from flask import Flask, request
-from libsql_client import create_client
 import time
 from functools import wraps
+import requests
 
 # =========================
 # 📝 ЛОГИРОВАНИЕ
@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 # 🔐 НАЛАШТУВАННЯ
 # =========================
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "ТВІЙ_ТОКЕН_БОТА")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "123456789"))
+ADMIN_ID = int(os.getenv("ADMIN_ID", "887078537"))
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://78655.onrender.com")
 
 TURSO_URL = os.getenv("TURSO_URL", "libsql://1qaz2wsx-yhbvgt65.aws-eu-west-1.turso.io")
@@ -43,6 +43,58 @@ app = Flask(__name__)
 # 🗄️ ПІДКЛЮЧЕННЯ ДО БД (TURSO)
 # =========================
 
+class TursoClient:
+    """Синхронный клиент для Turso БД через REST API"""
+    
+    def __init__(self, url: str, auth_token: str):
+        self.url = url
+        self.auth_token = auth_token
+        self.headers = {
+            "Authorization": f"Bearer {auth_token}",
+            "Content-Type": "application/json"
+        }
+    
+    def execute(self, query: str, params: list = None):
+        """Выполнить SQL запрос"""
+        try:
+            payload = {
+                "statements": [
+                    {
+                        "sql": query,
+                        "args": params or []
+                    }
+                ]
+            }
+            
+            response = requests.post(
+                f"{self.url}/v2/pipeline",
+                json=payload,
+                headers=self.headers,
+                timeout=10
+            )
+            
+            if response.status_code != 200:
+                raise Exception(f"DB Error: {response.text}")
+            
+            result = response.json()
+            
+            # Обработка результатов
+            if result.get("results"):
+                result_data = result["results"][0]
+                if result_data.get("rows"):
+                    return QueryResult(result_data["rows"])
+                return QueryResult([])
+            
+            return QueryResult([])
+        except Exception as e:
+            logger.error(f"❌ Ошибка выполнения запроса: {e}")
+            raise
+
+class QueryResult:
+    """Результат запроса к БД"""
+    def __init__(self, rows):
+        self.rows = rows
+
 client = None
 db_initialized = False
 
@@ -57,10 +109,7 @@ def init_client():
             logger.error("❌ TURSO_URL або TURSO_TOKEN не встановлені!")
             return False
         
-        # Видалення протокола для правильного підключення (якщо потрібно)
-        turso_url = TURSO_URL.replace("libsql://", "")
-        
-        client = create_client(url=TURSO_URL, auth_token=TURSO_TOKEN)
+        client = TursoClient(url=TURSO_URL, auth_token=TURSO_TOKEN)
         
         # Тестове підключення
         try:
@@ -381,7 +430,7 @@ def list_trainers(message):
         trainers = result.rows if hasattr(result, 'rows') and result.rows else []
         
         if not trainers:
-            bot.send_message(message.chat.id, "📭 Список тре��ерів порожній")
+            bot.send_message(message.chat.id, "📭 Список тренерів порожній")
             return
         
         text = "📋 **Список тренерів:**\n\n"
@@ -402,7 +451,7 @@ def list_trainers(message):
 # 👤 ВИБІР ТРЕНЕРА (КОРИСТУВАЧ)
 # =========================
 
-@bot.message_handler(func=lambda message: message.text == "Вибрати тренера")
+@bot.message_handler(func=lambda message: message.text == "Вибрат�� тренера")
 def choose_trainer_start(message):
     """Початок процесу вибору тренера"""
     try:
@@ -447,7 +496,7 @@ def get_phone(message):
 def get_user_name(message):
     """Отримання імені користувача"""
     try:
-        if message.text == "◀️ С��асувати":
+        if message.text == "◀️ Скасувати":
             cancel_selection(message)
             return
         
@@ -592,7 +641,7 @@ def cancel_selection(message):
         user_form.pop(message.chat.id, None)
         
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-        markup.add("Вибрати тренера", "Зв'язатися з адміністратором")
+        markup.add("Вибрати тренера", "Зв'язатися з адмініст��атором")
         
         bot.send_message(message.chat.id, "Скасовано. Головне меню:", reply_markup=markup)
     except Exception as e:
@@ -604,7 +653,7 @@ def cancel_selection(message):
 
 @bot.message_handler(func=lambda message: message.text == "Зв'язатися з адміністратором")
 def contact_admin_start(message):
-    """Ініціація чату з адміні��тратором"""
+    """Ініціація чату з адміністратором"""
     try:
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
         markup.add("🛑 Завершити чат")
