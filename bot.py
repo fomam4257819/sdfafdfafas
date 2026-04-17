@@ -29,7 +29,7 @@ DB_RETRY_DELAY = 2
 # =========================
 user_states  = {}   # {chat_id: "state_name"}
 user_form    = {}   # {chat_id: {phone, name, level, trainer_id, trainer_name, trainer_username}}
-trainer_form = {}   # {chat_id: {username, name, description}} or used for admin temporary storage
+trainer_form = {}   # {chat_id: {username, name, description}} або тимчасові дані адміна
 admin_chats  = {}   # {user_chat_id: admin_chat_id}
 
 bot = telebot.TeleBot(TOKEN)
@@ -163,6 +163,7 @@ def init_db() -> bool:
         logger.error(f"❌ init_db: {e}")
         return False
 
+
 # ==========================================================
 # 🛠️  КОНСТАНТИ І ДОПОМІЖНІ ФУНКЦІЇ
 # ==========================================================
@@ -200,16 +201,20 @@ def cancel_only_markup() -> types.ReplyKeyboardMarkup:
 
 
 def send_main_menu(chat_id: int, user_id: int, text: str = "Головне меню:"):
+    """
+    ВИПРАВЛЕННЯ №1: user_form.pop() ВИДАЛЕНО звідси.
+    Дані заявки зберігаються до підтвердження/відхилення адміном.
+    Очищення відбувається тільки в admin_confirm_enroll та admin_write_reject_reason.
+    """
     user_states.pop(chat_id, None)
-    user_form.pop(chat_id, None)
+    # user_form.pop(chat_id, None)  ← ВИДАЛЕНО: призводило до втрати даних заявки
     trainer_form.pop(chat_id, None)
     user_states[chat_id] = "main_menu"
     bot.send_message(chat_id, text, reply_markup=main_menu_markup(user_id))
 
 
 def reset_to_main(message):
-    """Универсальная отмена — всегда возвращает в главное меню.
-    Если был активен чат с админом — корректно завершает его."""
+    """Універсальне скасування — повертає у головне меню."""
     cid = message.chat.id
     uid = message.from_user.id
 
@@ -226,7 +231,7 @@ def reset_to_main(message):
     elif cid in admin_chats:
         admin_id = admin_chats.pop(cid)
         try:
-            bot.send_message(admin_id, f"👤 Користувач завершив чат.")
+            bot.send_message(admin_id, "👤 Користувач завершив чат.")
         except Exception:
             pass
 
@@ -234,8 +239,8 @@ def reset_to_main(message):
 
 
 def format_trainer_card(name: str, username: str, desc: str, index: int = None) -> str:
-    """Красиво форматирует карточку тренера."""
-    prefix = f"{index}\\. " if index else ""
+    """Форматує картку тренера."""
+    prefix    = f"{index}. " if index else ""
     desc_text = desc if desc else "Опис не вказано"
     return (
         f"{prefix}👨‍🏫 *{name}*\n"
@@ -243,6 +248,7 @@ def format_trainer_card(name: str, username: str, desc: str, index: int = None) 
         f"📝 _{desc_text}_\n"
         f"{'─' * 28}"
     )
+
 
 # ==========================================================
 # 🏁  /start
@@ -254,7 +260,7 @@ def cmd_start(message):
 
 
 # ==========================================================
-# ❌  УНИВЕРСАЛЬНАЯ О��МЕНА  (регистрируется первой!)
+# ❌  УНІВЕРСАЛЬНЕ СКАСУВАННЯ  (реєструється першим!)
 # ==========================================================
 @bot.message_handler(func=lambda m: m.text == BTN_CANCEL)
 def universal_cancel(message):
@@ -262,7 +268,7 @@ def universal_cancel(message):
 
 
 # ==========================================================
-# 👨‍🏫  НАШІ ТРЕНЕРИ (публичная кнопка в главном меню)
+# 👨‍🏫  НАШІ ТРЕНЕРИ (публічна кнопка в головному меню)
 # ==========================================================
 @bot.message_handler(func=lambda m: m.text == "👨‍🏫 Наші тренери")
 def show_our_trainers(message):
@@ -286,19 +292,18 @@ def show_our_trainers(message):
         )
         return
 
-    header = f"👨‍🏫 *Наші тренери* — {len(trainers)} фахівці:\n\n"
-    bot.send_message(message.chat.id, header, parse_mode="Markdown")
-
+    bot.send_message(
+        message.chat.id,
+        f"👨‍🏫 *Наші тренери* — {len(trainers)} фахівці:",
+        parse_mode="Markdown"
+    )
     for i, row in enumerate(trainers, 1):
-        # Рaспаковка значений Turso (формат {type, value}) перед приведением к str
         name  = _unpack_turso_value(row[1])
         uname = _unpack_turso_value(row[2])
         desc  = _unpack_turso_value(row[3])
-
-        name  = str(name)
-        uname = str(uname)
-        desc  = str(desc) if desc else "Опис не вказано"
-
+        name  = str(name)  if name  else "Без імені"
+        uname = str(uname) if uname else "no_username"
+        desc  = str(desc)  if desc  else "Опис не вказано"
         card  = format_trainer_card(name, uname, desc, index=i)
         bot.send_message(message.chat.id, card, parse_mode="Markdown")
 
@@ -332,16 +337,12 @@ def admin_back(message):
 def add_trainer_start(message):
     if message.from_user.id != ADMIN_ID:
         return
-
     trainer_form[message.chat.id] = {}
     user_states[message.chat.id]  = "add_trainer_username"
-
     bot.send_message(
         message.chat.id,
         "📝 Додавання тренера — крок 1/3\n\n"
-        "Введіть @username тренера\n\n"
-        "Приклад:\n"
-        "@chess_coach_ivan",
+        "Введіть @username тренера\n\nПриклад:\n@chess_coach_ivan",
         reply_markup=cancel_only_markup()
     )
 
@@ -356,7 +357,7 @@ def add_trainer_username(message):
     user_states[message.chat.id] = "add_trainer_name"
     bot.send_message(
         message.chat.id,
-        "📝 *Д��давання тренера* — крок 2/3\n\nВведіть повне ім'я тренера:",
+        "📝 *Додавання тренера* — крок 2/3\n\nВведіть повне ім'я тренера:",
         parse_mode="Markdown",
         reply_markup=cancel_only_markup()
     )
@@ -426,27 +427,23 @@ def delete_trainer_start(message):
         bot.send_message(message.chat.id, "📭 Тренерів немає.", reply_markup=admin_menu_markup())
         return
 
-    # Отправляем каждого тренера отдельным сообщением с кнопкой "🗑 Вилучити"
-    bot.send_message(message.chat.id, f"🗑 Оберіть тренера для видалення ({len(trainers)} чол.):\n⚠️ Видалення відбудеться одразу.")
+    bot.send_message(
+        message.chat.id,
+        f"🗑 Оберіть тренера для видалення ({len(trainers)} чол.):\n"
+        "⚠️ Видалення відбудеться одразу."
+    )
     for row in trainers:
-        # Распаковка значений Turso
         tid_raw = _unpack_turso_value(row[0])
         try:
             tid = int(tid_raw)
         except Exception:
-            # если не удалось привести к int — пропускаем
             continue
         name  = _unpack_turso_value(row[1])
         uname = _unpack_turso_value(row[2])
-
-        name  = str(name) if name is not None else "Без імені"
+        name  = str(name)  if name  is not None else "Без імені"
         uname = str(uname) if uname is not None else "no_username"
 
-        card = (
-            f"👨‍🏫 {name}\n"
-            f"📎 @{uname}\n"
-        )
-
+        card = f"👨‍🏫 {name}\n📎 @{uname}"
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton("🗑 Вилучити", callback_data=f"delete_{tid}"))
         bot.send_message(message.chat.id, card, reply_markup=markup)
@@ -457,7 +454,6 @@ def delete_trainer_handler(call):
     if call.from_user.id != ADMIN_ID:
         bot.answer_callback_query(call.id, "❌ Немає доступу", show_alert=True)
         return
-
     try:
         tid = int(call.data.split("_", 1)[1])
     except (IndexError, ValueError):
@@ -473,7 +469,6 @@ def delete_trainer_handler(call):
         if not result.rows:
             bot.answer_callback_query(call.id, "❌ Тренера не знайдено", show_alert=True)
             return
-        # распаковка результата на всякий случай
         name_raw = result.rows[0][0]
         name = _unpack_turso_value(name_raw) if isinstance(name_raw, dict) else name_raw
         name = str(name)
@@ -488,12 +483,11 @@ def delete_trainer_handler(call):
             parse_mode="Markdown"
         )
         bot.send_message(call.message.chat.id, "Що далі?", reply_markup=admin_menu_markup())
-
     except Exception as e:
         bot.answer_callback_query(call.id, f"❌ {str(e)[:80]}", show_alert=True)
 
 
-# ── СПИСОК ТРЕНЕРІВ (адмін) — красивые карточки ─────────
+# ── СПИСОК ТРЕНЕРІВ (адмін) ─────────────────────────────
 @bot.message_handler(func=lambda m: m.text == "📋 Список тренерів")
 def list_trainers(message):
     if message.from_user.id != ADMIN_ID:
@@ -519,21 +513,18 @@ def list_trainers(message):
         parse_mode="Markdown"
     )
     for i, row in enumerate(trainers, 1):
-        tid   = int(row[0])
-        name  = str(row[1])
-        uname = str(row[2])
-        desc  = str(row[3]) if row[3] else ""
-
-        card = (
-            f"*{i}\\. {name}*\n"
-            f"🔗 @{uname}  \\(ID: `{tid}`\\)\n"
-            f"📝 _{desc if desc else 'Опис не вказано'}_"
-        )
-        bot.send_message(message.chat.id, card, parse_mode="MarkdownV2")
+        name  = _unpack_turso_value(row[1])
+        uname = _unpack_turso_value(row[2])
+        desc  = _unpack_turso_value(row[3])
+        name  = str(name)  if name  else "Без імені"
+        uname = str(uname) if uname else "no_username"
+        desc  = str(desc)  if desc  else "Опис не вказано"
+        card  = format_trainer_card(name, uname, desc, index=i)
+        bot.send_message(message.chat.id, card, parse_mode="Markdown")
 
 
 # ==========================================================
-# 👤  ВИБІР ТРЕНЕРА (пользователь)
+# 👤  ВИБІР ТРЕНЕРА (користувач)
 # ==========================================================
 @bot.message_handler(func=lambda m: m.text == "♟️ Вибрати тренера")
 def choose_trainer_start(message):
@@ -614,23 +605,20 @@ def user_got_level(message):
 
     bot.send_message(
         message.chat.id,
-        f"✅ Рівень *{message.text}* збережено\\!\n\n"
+        f"✅ Рівень *{message.text}* збережено!\n\n"
         f"👇 Оберіть тренера — натисніть кнопку під карткою:",
-        parse_mode="MarkdownV2",
+        parse_mode="Markdown",
         reply_markup=cancel_only_markup()
     )
 
-    # Исправленная раскладка значений Turso и новая кнопка
     for row in trainers:
         tid_raw  = _unpack_turso_value(row[0])
         name_raw = _unpack_turso_value(row[1])
         desc_raw = _unpack_turso_value(row[2])
-
         try:
             tid = int(tid_raw)
         except Exception:
             continue
-
         name = str(name_raw) if name_raw is not None else "Без імені"
         desc = str(desc_raw) if desc_raw else "Опис відсутній"
 
@@ -641,23 +629,15 @@ def user_got_level(message):
         )
         pick_markup = types.InlineKeyboardMarkup()
         pick_markup.add(
-            types.InlineKeyboardButton(
-                "📚 Записатися на курс",
-                callback_data=f"pick_{tid}"
-            )
+            types.InlineKeyboardButton("📚 Записатися на курс", callback_data=f"pick_{tid}")
         )
-        bot.send_message(
-            message.chat.id,
-            card,
-            parse_mode="Markdown",
-            reply_markup=pick_markup
-        )
+        bot.send_message(message.chat.id, card, parse_mode="Markdown", reply_markup=pick_markup)
 
     user_states[message.chat.id] = "user_picking_trainer"
 
 
 # ==========================================================
-# ✅  ОБРАТИ ТРЕНЕРА → запрос на подтверждение админу
+# ✅  ОБРАТИ ТРЕНЕРА → запит на підтвердження адміну
 # ==========================================================
 @bot.callback_query_handler(func=lambda c: c.data.startswith("pick_"))
 def user_picked_trainer(call):
@@ -679,86 +659,71 @@ def user_picked_trainer(call):
         bot.answer_callback_query(call.id, "❌ Помилка БД", show_alert=True)
         return
     try:
-        # Получаем тренера из БД и распаковываем значения
-        result = db.execute(
-            "SELECT username, name FROM trainers WHERE id = ?",
-            [tid]
-        ).rows
-
+        result = db.execute("SELECT username, name FROM trainers WHERE id = ?", [tid]).rows
         if not result:
             bot.answer_callback_query(call.id, "❌ Тренер не знайдений", show_alert=True)
             return
-
-        trainer_username = _unpack_turso_value(result[0][0])
-        trainer_name     = _unpack_turso_value(result[0][1])
-
-        trainer_username = str(trainer_username)
-        trainer_name     = str(trainer_name)
-
+        trainer_username = str(_unpack_turso_value(result[0][0]))
+        trainer_name     = str(_unpack_turso_value(result[0][1]))
     except Exception as e:
         bot.answer_callback_query(call.id, f"❌ {str(e)[:50]}", show_alert=True)
         return
 
-    # Сохраняем данные тренера в сессию — нужны при подтверждении
+    # Зберігаємо дані тренера — потрібні адміну при підтвердженні
     data["trainer_id"]       = tid
     data["trainer_name"]     = trainer_name
     data["trainer_username"] = trainer_username
 
     bot.answer_callback_query(call.id, "📨 Заявку надіслано!")
 
-    # --- Сообщение ученику ---
+    # Повідомлення учню
     bot.edit_message_text(
-        f"✅ Ви записались до тренера *{trainer_name}*\\!\n\n"
-        f"⏳ Очікуйте підтвердження адміністратора\\.\n"
-        f"Як тільки адмін підтвердить — ви отримаєте повідомлення\\.",
+        f"✅ Ви записались до тренера *{trainer_name}*!\n\n"
+        f"⏳ Очікуйте підтвердження адміністратора.\n"
+        f"Як тільки адмін підтвердить — ви отримаєте повідомлення.",
         cid, call.message.message_id,
-        parse_mode="MarkdownV2"
+        parse_mode="Markdown"
     )
+    # НЕ видаляємо user_form тут — дані потрібні для підтвердження
     send_main_menu(cid, call.from_user.id, "Ми повідомимо вас!")
 
-    # --- Сообщение тренеру (предварительное — без подтверждения) ---
+    # Попереднє повідомлення тренеру
     trainer_msg = (
-        f"📬 *Новий запит на заняття\\!*\n\n"
+        f"📬 *Новий запит на заняття!*\n\n"
         f"👤 Учень: *{data['name']}*\n"
         f"📱 Телефон: `{data['phone']}`\n"
         f"♟️ Рівень: {data['level']}\n\n"
-        f"_Очікуйте підтвердження від адміністратора\\._"
+        f"_Очікуйте підтвердження від адміністратора._"
     )
     try:
-        bot.send_message(f"@{trainer_username}", trainer_msg, parse_mode="MarkdownV2")
+        bot.send_message(f"@{trainer_username}", trainer_msg, parse_mode="Markdown")
         logger.info(f"📨 Попередження тренеру @{trainer_username} надіслано")
     except Exception as e:
         logger.warning(f"⚠️ Не вдалося надіслати тренеру @{trainer_username}: {e}")
 
-    # --- Сообщение АДМИНИСТРАТОРУ с кнопкой подтверждения ---
-    user_tg = f"@{call.from_user.username}" if call.from_user.username else f"ID {cid}"
+    # Повідомлення адміністратору з кнопками підтвердження
+    user_tg   = f"@{call.from_user.username}" if call.from_user.username else f"ID {cid}"
     admin_msg = (
-        f"📋 *Новий запис до тренера\\!*\n\n"
-        f"👤 Учень: *{data['name']}* \\({user_tg}\\)\n"
+        f"📋 *Новий запис до тренера!*\n\n"
+        f"👤 Учень: *{data['name']}* ({user_tg})\n"
         f"📱 Телефон: `{data['phone']}`\n"
         f"♟️ Рівень: {data['level']}\n"
-        f"👨‍🏫 Тренер: *{trainer_name}* \\(@{trainer_username}\\)\n\n"
+        f"👨‍🏫 Тренер: *{trainer_name}* (@{trainer_username})\n\n"
         f"Підтвердіть або відхиліть запис:"
     )
     confirm_markup = types.InlineKeyboardMarkup()
     confirm_markup.row(
-        types.InlineKeyboardButton(
-            "✅ Підтвердити",
-            callback_data=f"confirm_enroll_{cid}_{tid}"
-        ),
-        types.InlineKeyboardButton(
-            "❌ Відхилити",
-            callback_data=f"reject_enroll_{cid}_{tid}"
-        )
+        types.InlineKeyboardButton("✅ Підтвердити", callback_data=f"confirm_enroll_{cid}_{tid}"),
+        types.InlineKeyboardButton("❌ Відхилити",   callback_data=f"reject_enroll_{cid}_{tid}")
     )
     try:
-        bot.send_message(ADMIN_ID, admin_msg, parse_mode="MarkdownV2", reply_markup=confirm_markup)
+        bot.send_message(ADMIN_ID, admin_msg, parse_mode="Markdown", reply_markup=confirm_markup)
     except Exception as e:
         logger.error(f"❌ Не вдалося надіслати адміну: {e}")
 
 
 # ==========================================================
-# ✅ / ❌  АДМІН ПІДТВЕРДЖУЄ / ВІДХИЛЯЄ ЗАПИС
+# ✅  АДМІН ПІДТВЕРДЖУЄ ЗАПИС
 # ==========================================================
 @bot.callback_query_handler(func=lambda c: c.data.startswith("confirm_enroll_"))
 def admin_confirm_enroll(call):
@@ -766,9 +731,7 @@ def admin_confirm_enroll(call):
         bot.answer_callback_query(call.id, "❌ Тільки для адміна", show_alert=True)
         return
 
-    # callback: confirm_enroll_{user_cid}_{trainer_id}
     parts = call.data.split("_")
-    # ["confirm","enroll","cid","tid"]
     try:
         user_cid = int(parts[2])
         tid      = int(parts[3])
@@ -776,59 +739,69 @@ def admin_confirm_enroll(call):
         bot.answer_callback_query(call.id, "❌ Некоректні дані", show_alert=True)
         return
 
+    # ВИПРАВЛЕННЯ №2: перевірка наявності даних до обробки
     data = user_form.get(user_cid)
+    if not data:
+        bot.answer_callback_query(call.id, "❌ Дані заявки не знайдені", show_alert=True)
+        return
+
+    trainer_name     = data.get("trainer_name", "тренера")
+    trainer_username = data.get("trainer_username")
+    user_name        = data.get("name", "учня")
+    user_phone       = data.get("phone", "—")
+    user_level       = data.get("level", "—")
 
     bot.answer_callback_query(call.id, "✅ Запис підтверджено!")
-    bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
-    bot.edit_message_text(
-        call.message.text + "\n\n✅ *Підтверджено адміністратором\\.*",
-        call.message.chat.id, call.message.message_id,
-        parse_mode="MarkdownV2"
-    )
 
-    trainer_name     = data["trainer_name"]     if data else "тренера"
-    trainer_username = data["trainer_username"] if data else None
-    user_name        = data["name"]             if data else "учня"
-    user_phone       = data["phone"]            if data else "—"
-    user_level       = data["level"]            if data else "—"
+    try:
+        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
+        bot.edit_message_text(
+            call.message.text + "\n\n✅ Підтверджено адміністратором.",
+            call.message.chat.id, call.message.message_id,
+            parse_mode="Markdown"
+        )
+    except Exception:
+        pass
 
-    # --- Сообщение ученику с уточнением, что адмiн зв'яжеться ---
+    # Повідомлення учню
     try:
         bot.send_message(
             user_cid,
-            f"🎉 *Запис підтверджено\\!*\n\n"
-            f"Адміністратор підтвердив ваш запис до тренера *{trainer_name}*\\.\n"
-            f"⏳ Адміністратор незабаром зв'яжеться з вами для узгодження деталей занять\\.\n\n"
-            f"_Дякуємо за довіру\\!_",
-            parse_mode="MarkdownV2"
+            f"🎉 *Запис підтверджено!*\n\n"
+            f"Адміністратор підтвердив ваш запис до тренера *{trainer_name}*.\n"
+            f"⏳ Адміністратор незабаром зв'яжеться з вами для узгодження деталей занять.\n\n"
+            f"_Дякуємо за довіру!_",
+            parse_mode="Markdown"
         )
     except Exception as e:
         logger.warning(f"Не вдалося надіслати учню {user_cid}: {e}")
 
-    # --- Сообщение тренеру ---
+    # Повідомлення тренеру
     if trainer_username:
         try:
             bot.send_message(
                 f"@{trainer_username}",
-                f"✅ *Адмін підтвердив запис\\!*\n\n"
+                f"✅ *Адмін підтвердив запис!*\n\n"
                 f"До вас записався новий учень:\n"
                 f"👤 *{user_name}*\n"
                 f"📱 `{user_phone}`\n"
                 f"♟️ Рівень: {user_level}\n\n"
-                f"Зв'яжіться з учнем для організації занять\\!",
-                parse_mode="MarkdownV2"
+                f"Зв'яжіться з учнем для організації занять!",
+                parse_mode="Markdown"
             )
         except Exception as e:
             logger.warning(f"Не вдалося надіслати тренеру @{trainer_username}: {e}")
 
-    # Очищаем сессию
+    # Очищаємо сесію після завершення
     user_form.pop(user_cid, None)
     user_states.pop(user_cid, None)
 
 
+# ==========================================================
+# ❌  АДМІН ВІДХИЛЯЄ ЗАПИС → просимо причину
+# ==========================================================
 @bot.callback_query_handler(func=lambda c: c.data.startswith("reject_enroll_"))
 def admin_reject_enroll(call):
-    # Новый поток: админ сначала предоставляет причину, только потом ученик получит сообщение
     if call.from_user.id != ADMIN_ID:
         bot.answer_callback_query(call.id, "❌ Тільки для адміна", show_alert=True)
         return
@@ -836,86 +809,90 @@ def admin_reject_enroll(call):
     parts = call.data.split("_")
     try:
         user_cid = int(parts[2])
-        tid = int(parts[3])
+        tid      = int(parts[3])
     except Exception:
         bot.answer_callback_query(call.id, "❌ Некоректні дані", show_alert=True)
         return
 
-    # Берём текущее имя тренера из сессии ученика, если есть
-    data = user_form.get(user_cid)
-    trainer_name = data.get("trainer_name") if data else ""
+    data         = user_form.get(user_cid)
+    trainer_name = data.get("trainer_name", "") if data else ""
 
-    # Сохраняем состояние ожидания причины у администратора
-    user_states[ADMIN_ID] = "waiting_reject_reason"
-
-    # Сохраняем временные данные админу (по chat_id == ADMIN_ID)
-    trainer_form[ADMIN_ID] = {
-        "user_cid": user_cid,
+    # Зберігаємо стан і дані для хендлера причини
+    user_states[ADMIN_ID]    = "waiting_reject_reason"
+    trainer_form[ADMIN_ID]   = {
+        "user_cid":     user_cid,
         "trainer_name": trainer_name,
-        "tid": tid
+        "tid":          tid
     }
 
-    # Подтверждаем callback и просим причину
     bot.answer_callback_query(call.id)
 
-    # Убираем кнопки в сообщении админа и помечаем, что админ пишет причину
     try:
         bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
         bot.edit_message_text(
-            call.message.text + "\n\n⏳ *Очікуємо причину від адміністратора...*",
+            call.message.text + "\n\n⏳ Очікуємо причину від адміністратора...",
             call.message.chat.id, call.message.message_id,
-            parse_mode="MarkdownV2"
+            parse_mode="Markdown"
         )
     except Exception:
         pass
 
     bot.send_message(
         call.message.chat.id,
-        "❌ *Відхилення запису*\n\n"
-        "Напишіть причину відмови для учня:",
-        parse_mode="MarkdownV2",
+        "❌ *Відхилення запису*\n\nНапишіть причину відмови для учня:",
+        parse_mode="Markdown",
         reply_markup=cancel_only_markup()
     )
 
 
+# ==========================================================
+# ✏️  АДМІН ВВОДИТЬ ПРИЧИНУ ВІДХИЛЕННЯ
+# ВИПРАВЛЕННЯ №3: доданий відсутній хендлер
+# ==========================================================
 @bot.message_handler(func=lambda m: user_states.get(m.chat.id) == "waiting_reject_reason")
 def admin_write_reject_reason(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+
     data = trainer_form.get(message.chat.id)
     if not data:
-        # защита на случай рассинхронизации
-        bot.send_message(message.chat.id, "❌ Помилка: дані не знайдені.", reply_markup=admin_menu_markup())
+        bot.send_message(
+            message.chat.id,
+            "❌ Помилка: дані не знайдені.",
+            reply_markup=admin_menu_markup()
+        )
         user_states.pop(message.chat.id, None)
         return
 
-    reason = message.text or ""
-    user_cid = data["user_cid"]
-    trainer_name = data.get("trainer_name", "")
+    reason       = message.text.strip() if message.text else "Без причини"
+    user_cid     = data["user_cid"]
+    trainer_name = data.get("trainer_name", "тренера")
 
-    # Отправляе�� ученику уведомление с причиной
+    # Надсилаємо учню повідомлення з причиною
     try:
         bot.send_message(
             user_cid,
-            f"❌ *Запис відхилено\\!*\n\n"
+            f"❌ *Запис відхилено!*\n\n"
             f"👨‍🏫 Тренер: *{trainer_name}*\n\n"
             f"📝 *Причина:*\n{reason}\n\n"
             f"Спробуйте обрати іншого тренера або зверніться до адміністратора.",
-            parse_mode="MarkdownV2",
+            parse_mode="Markdown",
             reply_markup=main_menu_markup(user_cid)
         )
     except Exception as e:
         logger.warning(f"Не вдалося надіслати учню {user_cid}: {e}")
 
-    # Подтверждение админу
     bot.send_message(
         message.chat.id,
-        "✅ Учня повідомлено про відмову",
+        "✅ Учня повідомлено про відмову.",
         reply_markup=admin_menu_markup()
     )
 
-    # Очистка сессий
+    # Очищення всіх сесій
     user_states.pop(message.chat.id, None)
     trainer_form.pop(message.chat.id, None)
     user_form.pop(user_cid, None)
+    user_states.pop(user_cid, None)
 
 
 # ==========================================================
@@ -928,9 +905,8 @@ def contact_admin_start(message):
     markup.add(BTN_CANCEL)
     bot.send_message(
         message.chat.id,
-        "⏳ Запит надіслано адміністратору\\. Очікуйте…\n"
-        "Натисніть *❌ Скасувати*, щоб повернутись до меню\\.",
-        parse_mode="MarkdownV2",
+        "⏳ Запит надіслано адміністратору. Очікуйте…\n"
+        "Натисніть «❌ Скасувати», щоб повернутись до меню.",
         reply_markup=markup
     )
 
@@ -961,19 +937,16 @@ def chat_accept(call):
     admin_kb.add(BTN_CANCEL)
     bot.send_message(
         call.from_user.id,
-        f"💬 Чат з користувачем {uid} розпочато\\.\n"
-        f"Натисніть *❌ Скасувати*, щоб завершити\\.",
-        parse_mode="MarkdownV2",
+        f"💬 Чат з користувачем {uid} розпочато.\n"
+        f"Натисніть «❌ Скасувати», щоб завершити.",
         reply_markup=admin_kb
     )
-
     user_kb = types.ReplyKeyboardMarkup(resize_keyboard=True)
     user_kb.add(BTN_CANCEL)
     bot.send_message(
         uid,
-        "✅ Адміністратор прийняв запит\\. Пишіть\\!\n"
-        "Натисніть *❌ Скасувати*, щоб завершити чат\\.",
-        parse_mode="MarkdownV2",
+        "✅ Адміністратор прийняв запит. Пишіть!\n"
+        "Натисніть «❌ Скасувати», щоб завершити чат.",
         reply_markup=user_kb
     )
 
@@ -985,8 +958,7 @@ def chat_reject(call):
     user_states.pop(uid, None)
     bot.send_message(
         uid,
-        "😔 Адміністратор зараз недоступний\\. Спробуйте пізніше\\.",
-        parse_mode="MarkdownV2",
+        "😔 Адміністратор зараз недоступний. Спробуйте пізніше.",
         reply_markup=main_menu_markup(uid)
     )
 
