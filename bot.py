@@ -35,16 +35,6 @@ admin_chats  = {}   # {user_chat_id: admin_chat_id}
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
-app = Flask(name)
-
-@app.route("/")
-def home():
-    return "OK", 200
-
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    return "Webhook received", 200
-
 
 # ==========================================================
 # 🗄️  TURSO DATABASE LAYER
