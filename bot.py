@@ -192,10 +192,97 @@ LEVEL_BADGE = {
 }
 
 # ==========================================================
-# ⏳  TYPING ACTION — ефект "бот друкує..."
+# ✨  WOW-ЕФЕКТ — преміум лоадер для кожної дії
+#
+#  Принцип роботи:
+#  1. bot.send_chat_action()  →  Telegram показує "друкує..."
+#  2. bot.send_message()      →  відправляємо placeholder-повідомлення з текстом лоадера
+#  3. time.sleep(tiny_delay)  →  мікро-пауза для ефекту "обробки"
+#  4. bot.edit_message_text() →  замінюємо placeholder на реальний результат
+#     (або просто видаляємо — залежно від use-case)
+#
+#  wow_action(chat_id, action)  →  відправляє placeholder, повертає message_id
+#  wow_done(chat_id, msg_id, text, **kwargs)  →  редагує placeholder в результат
+#  wow_delete(chat_id, msg_id)  →  тихо видаляє placeholder
 # ==========================================================
+
+# Тексти лоадерів під кожну дію — щоб виглядало "розумно"
+_WOW_TEXTS = {
+    "search":   "🔍  _Шукаємо для вас..._",
+    "save":     "💾  _Зберігаємо дані..._",
+    "send":     "📨  _Відправляємо заявку..._",
+    "load":     "⚡️  _Завантажуємо..._",
+    "process":  "⚙️  _Обробляємо..._",
+    "check":    "🛡  _Перевіряємо..._",
+    "connect":  "🔗  _Підключаємось..._",
+    "welcome":  "✨  _Готуємо для вас..._",
+}
+
+# chat_action для різних типів дій (Telegram показує різні анімації)
+_WOW_ACTIONS = {
+    "search":   "typing",
+    "save":     "upload_document",
+    "send":     "typing",
+    "load":     "typing",
+    "process":  "upload_document",
+    "check":    "typing",
+    "connect":  "typing",
+    "welcome":  "typing",
+}
+
+
+def wow_action(chat_id: int, kind: str = "load") -> int | None:
+    """
+    Відправляє chat_action + placeholder-повідомлення.
+    Повертає message_id placeholder або None при помилці.
+    """
+    try:
+        bot.send_chat_action(chat_id, _WOW_ACTIONS.get(kind, "typing"))
+    except Exception:
+        pass
+    try:
+        msg = bot.send_message(chat_id, _WOW_TEXTS.get(kind, "⏳  _Зачекайте..._"),
+                               parse_mode="Markdown")
+        return msg.message_id
+    except Exception:
+        return None
+
+
+def wow_done(chat_id: int, msg_id: int | None,
+             text: str, parse_mode: str = None,
+             reply_markup=None):
+    """
+    Редагує placeholder в фінальне повідомлення.
+    Якщо редагування не вдалось — відправляє нове (fallback).
+    """
+    if msg_id:
+        try:
+            bot.edit_message_text(text, chat_id, msg_id,
+                                  parse_mode=parse_mode,
+                                  reply_markup=reply_markup)
+            return
+        except Exception:
+            pass
+    # fallback: просто відправляємо нове
+    try:
+        bot.send_message(chat_id, text, parse_mode=parse_mode,
+                         reply_markup=reply_markup)
+    except Exception:
+        pass
+
+
+def wow_delete(chat_id: int, msg_id: int | None):
+    """Тихо видаляє placeholder якщо він більше не потрібен."""
+    if not msg_id:
+        return
+    try:
+        bot.delete_message(chat_id, msg_id)
+    except Exception:
+        pass
+
+
+# Зворотна сумісність — стара назва typing() теж працює
 def typing(chat_id: int):
-    """Показує індикатор 'друкує...' — відчуття живого бота."""
     try:
         bot.send_chat_action(chat_id, "typing")
     except Exception:
@@ -283,7 +370,7 @@ def cmd_start(message):
     cid        = message.chat.id
     uid        = message.from_user.id
     first_name = message.from_user.first_name or "друже"
-    typing(cid)
+    loader = wow_action(cid, "welcome")
     welcome = (
         "♟️ *Шахова школа*\n"
         "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n\n"
@@ -294,6 +381,7 @@ def cmd_start(message):
         "› Зв'язатися з адміністратором\n\n"
         "⬇️ _Оберіть дію нижче_"
     )
+    wow_delete(cid, loader)
     send_main_menu(cid, uid, welcome, parse_mode="MarkdownV2")
 
 
@@ -310,34 +398,31 @@ def universal_cancel(message):
 # ==========================================================
 @bot.message_handler(func=lambda m: m.text == "👨‍🏫 Наші тренери")
 def show_our_trainers(message):
-    typing(message.chat.id)
+    cid    = message.chat.id
+    loader = wow_action(cid, "search")
     db = get_db()
     if not db:
-        bot.send_message(message.chat.id, "❌ Помилка підключення до БД.")
+        wow_done(cid, loader, "❌ Помилка підключення до БД.")
         return
     try:
         trainers = db.execute(
             "SELECT id, name, username, description FROM trainers ORDER BY name"
         ).rows
     except Exception as e:
-        bot.send_message(message.chat.id, f"❌ Помилка: {e}")
+        wow_done(cid, loader, f"❌ Помилка: {e}")
         return
 
     if not trainers:
-        bot.send_message(
-            message.chat.id,
-            "😔 Тренерів поки немає. Перевірте пізніше!",
-            reply_markup=main_menu_markup(message.from_user.id)
-        )
+        wow_done(cid, loader,
+                 "😔 Тренерів поки немає. Перевірте пізніше!",
+                 reply_markup=main_menu_markup(message.from_user.id))
         return
 
-    bot.send_message(
-        message.chat.id,
-        f"👨\u200d🏫 *Наші тренери*\n"
-        f"┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
-        f"Знайдено фахівців: *{len(trainers)}*",
-        parse_mode="Markdown"
-    )
+    wow_done(cid, loader,
+             f"👨\u200d🏫 *Наші тренери*\n"
+             f"┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
+             f"Знайдено фахівців: *{len(trainers)}*",
+             parse_mode="Markdown")
     for i, row in enumerate(trainers, 1):
         name  = _unpack_turso_value(row[1])
         uname = _unpack_turso_value(row[2])
@@ -346,10 +431,10 @@ def show_our_trainers(message):
         uname = str(uname) if uname else "no_username"
         desc  = str(desc)  if desc  else "Опис не вказано"
         card  = format_trainer_card(name, uname, desc, index=i)
-        bot.send_message(message.chat.id, card, parse_mode="Markdown")
+        bot.send_message(cid, card, parse_mode="Markdown")
 
     bot.send_message(
-        message.chat.id,
+        cid,
         "╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\n"
         "🎯 Готові розпочати?\n"
         "Натисніть *♟️ Вибрати тренера* щоб записатись\\!",
@@ -440,39 +525,39 @@ def add_trainer_name(message):
 
 @bot.message_handler(func=lambda m: user_states.get(m.chat.id) == "add_trainer_description")
 def add_trainer_description(message):
-    data = trainer_form.get(message.chat.id, {})
+    cid  = message.chat.id
+    data = trainer_form.get(cid, {})
     data["description"] = message.text.strip()
+    loader = wow_action(cid, "save")
     db = get_db()
     if not db:
-        bot.send_message(message.chat.id, "❌ Помилка підключення до БД.", reply_markup=admin_menu_markup())
-        user_states.pop(message.chat.id, None)
-        trainer_form.pop(message.chat.id, None)
+        wow_done(cid, loader, "❌ Помилка підключення до БД.", reply_markup=admin_menu_markup())
+        user_states.pop(cid, None)
+        trainer_form.pop(cid, None)
         return
     try:
         db.execute(
             "INSERT INTO trainers (username, name, description) VALUES (?, ?, ?)",
             [data["username"], data["name"], data["description"]]
         )
-        bot.send_message(
-            message.chat.id,
-            f"✅ *Тренер доданий\\!*\n"
-            f"┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
-            f"👨\u200d🏫 *{data['name']}*\n"
-            f"📎 {data['display_username']}\n\n"
-            f"_Тренер з'явиться у списку одразу\\._",
-            parse_mode="MarkdownV2",
-            reply_markup=admin_menu_markup()
-        )
+        wow_done(cid, loader,
+                 f"✅ *Тренер доданий\\!*\n"
+                 f"┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
+                 f"👨\u200d🏫 *{data['name']}*\n"
+                 f"📎 {data['display_username']}\n\n"
+                 f"_Тренер з'явиться у списку одразу\\._",
+                 parse_mode="MarkdownV2",
+                 reply_markup=admin_menu_markup())
         logger.info(f"✅ Додано тренера: {data['name']}")
     except Exception as e:
         if "unique" in str(e).lower() or "constraint" in str(e).lower():
-            bot.send_message(message.chat.id,
-                             f"⚠️ Тренер {data['display_username']} вже існує в базі.",
-                             reply_markup=admin_menu_markup())
+            wow_done(cid, loader,
+                     f"⚠️ Тренер {data['display_username']} вже існує в базі.",
+                     reply_markup=admin_menu_markup())
         else:
-            bot.send_message(message.chat.id, f"❌ Помилка: {e}", reply_markup=admin_menu_markup())
-    user_states.pop(message.chat.id, None)
-    trainer_form.pop(message.chat.id, None)
+            wow_done(cid, loader, f"❌ Помилка: {e}", reply_markup=admin_menu_markup())
+    user_states.pop(cid, None)
+    trainer_form.pop(cid, None)
 
 
 # ── ВИДАЛИТИ ТРЕНЕРА ────────────────────────────────────
@@ -480,27 +565,27 @@ def add_trainer_description(message):
 def delete_trainer_start(message):
     if message.from_user.id != ADMIN_ID:
         return
-    typing(message.chat.id)
+    cid    = message.chat.id
+    loader = wow_action(cid, "search")
     db = get_db()
     if not db:
-        bot.send_message(message.chat.id, "❌ Помилка підключення до БД.")
+        wow_done(cid, loader, "❌ Помилка підключення до БД.")
         return
     try:
         trainers = db.execute("SELECT id, name, username FROM trainers ORDER BY name").rows
     except Exception as e:
-        bot.send_message(message.chat.id, f"❌ Помилка: {e}")
+        wow_done(cid, loader, f"❌ Помилка: {e}")
         return
     if not trainers:
-        bot.send_message(message.chat.id, "📭 Тренерів немає.", reply_markup=admin_menu_markup())
+        wow_done(cid, loader, "📭 Тренерів немає.", reply_markup=admin_menu_markup())
         return
 
-    bot.send_message(
-        message.chat.id,
-        f"🗑 *Видалення тренера*\n"
-        f"┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
-        f"Тренерів у базі: *{len(trainers)}*\n\n"
-        f"⚠️ _Буде запит на підтвердження перед видаленням_"
-    )
+    wow_done(cid, loader,
+             f"🗑 *Видалення тренера*\n"
+             f"┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
+             f"Тренерів у базі: *{len(trainers)}*\n\n"
+             f"⚠️ _Буде запит на підтвердження перед видаленням_",
+             parse_mode="Markdown")
     for row in trainers:
         tid_raw = _unpack_turso_value(row[0])
         try:
@@ -628,29 +713,28 @@ def cancel_delete_trainer(call):
 def list_trainers(message):
     if message.from_user.id != ADMIN_ID:
         return
-    typing(message.chat.id)
+    cid    = message.chat.id
+    loader = wow_action(cid, "search")
     db = get_db()
     if not db:
-        bot.send_message(message.chat.id, "❌ Помилка підключення до БД.")
+        wow_done(cid, loader, "❌ Помилка підключення до БД.")
         return
     try:
         trainers = db.execute(
             "SELECT id, name, username, description FROM trainers ORDER BY name"
         ).rows
     except Exception as e:
-        bot.send_message(message.chat.id, f"❌ Помилка: {e}")
+        wow_done(cid, loader, f"❌ Помилка: {e}")
         return
     if not trainers:
-        bot.send_message(message.chat.id, "📭 Список тренерів порожній.")
+        wow_done(cid, loader, "📭 Список тренерів порожній.")
         return
 
-    bot.send_message(
-        message.chat.id,
-        f"📋 *Тренери в базі*\n"
-        f"┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
-        f"Знайдено: *{len(trainers)}* чол\\.",
-        parse_mode="MarkdownV2"
-    )
+    wow_done(cid, loader,
+             f"📋 *Тренери в базі*\n"
+             f"┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
+             f"Знайдено: *{len(trainers)}* чол\\.",
+             parse_mode="MarkdownV2")
     for i, row in enumerate(trainers, 1):
         name  = _unpack_turso_value(row[1])
         uname = _unpack_turso_value(row[2])
@@ -667,59 +751,57 @@ def list_trainers(message):
 # ==========================================================
 @bot.message_handler(func=lambda m: m.text == "♟️ Вибрати тренера")
 def choose_trainer_start(message):
-    typing(message.chat.id)
-    user_states[message.chat.id] = "user_waiting_phone"
+    cid    = message.chat.id
+    loader = wow_action(cid, "load")
+    user_states[cid] = "user_waiting_phone"
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add(types.KeyboardButton("📱 Поділитися номером", request_contact=True))
     markup.add(BTN_CANCEL)
-    bot.send_message(
-        message.chat.id,
-        "♟️ *Запис до тренера*\n"
-        "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
-        "🔵 Крок 1 з 3  ●○○\n\n"
-        "📱 Поділіться вашим номером телефону\n\n"
-        "_Натисніть кнопку нижче — це безпечно і потрібно для зв'язку з тренером_",
-        parse_mode="Markdown",
-        reply_markup=markup
-    )
+    wow_done(cid, loader,
+             "♟️ *Запис до тренера*\n"
+             "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
+             "🔵 Крок 1 з 3  ●○○\n\n"
+             "📱 Поділіться вашим номером телефону\n\n"
+             "_Натисніть кнопку нижче — це безпечно і потрібно для зв'язку з тренером_",
+             parse_mode="Markdown",
+             reply_markup=markup)
 
 
 @bot.message_handler(content_types=["contact"])
 def user_got_phone(message):
     if user_states.get(message.chat.id) != "user_waiting_phone":
         return
-    typing(message.chat.id)
-    user_form[message.chat.id] = {"phone": message.contact.phone_number}
-    user_states[message.chat.id] = "user_waiting_name"
-    bot.send_message(
-        message.chat.id,
-        "♟️ *Запис до тренера*\n"
-        "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
-        "🔵 Крок 2 з 3  ●●○\n\n"
-        "✍️ Введіть ваше ім'я та прізвище",
-        parse_mode="Markdown",
-        reply_markup=cancel_only_markup()
-    )
+    cid    = message.chat.id
+    loader = wow_action(cid, "check")
+    user_form[cid] = {"phone": message.contact.phone_number}
+    user_states[cid] = "user_waiting_name"
+    wow_done(cid, loader,
+             "♟️ *Запис до тренера*\n"
+             "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
+             "🔵 Крок 2 з 3  ●●○\n\n"
+             "✅ Номер збережено\\!\n\n"
+             "✍️ Введіть ваше ім'я та прізвище",
+             parse_mode="MarkdownV2",
+             reply_markup=cancel_only_markup())
 
 
 @bot.message_handler(func=lambda m: user_states.get(m.chat.id) == "user_waiting_name")
 def user_got_name(message):
-    typing(message.chat.id)
-    user_form[message.chat.id]["name"] = message.text.strip()
-    user_states[message.chat.id] = "user_waiting_level"
+    cid    = message.chat.id
+    loader = wow_action(cid, "check")
+    user_form[cid]["name"] = message.text.strip()
+    user_states[cid] = "user_waiting_level"
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.row("🌱 Початківець", "🎯 Аматор")
     markup.row("⚔️ Просунутий",  "👑 Експерт")
     markup.add(BTN_CANCEL)
-    bot.send_message(
-        message.chat.id,
-        "♟️ *Запис до тренера*\n"
-        "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
-        "🔵 Крок 3 з 3  ●●●\n\n"
-        "♟️ Оберіть ваш рівень гри в шахи:",
-        parse_mode="Markdown",
-        reply_markup=markup
-    )
+    wow_done(cid, loader,
+             "♟️ *Запис до тренера*\n"
+             "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
+             "🔵 Крок 3 з 3  ●●●\n\n"
+             "♟️ Оберіть ваш рівень гри в шахи:",
+             parse_mode="Markdown",
+             reply_markup=markup)
 
 
 @bot.message_handler(func=lambda m: user_states.get(m.chat.id) == "user_waiting_level")
@@ -728,13 +810,14 @@ def user_got_level(message):
     if message.text not in allowed:
         bot.send_message(message.chat.id, "Оберіть рівень із кнопок нижче.")
         return
-    typing(message.chat.id)
-    user_form[message.chat.id]["level"] = message.text
+    cid        = message.chat.id
+    loader     = wow_action(cid, "search")
+    user_form[cid]["level"] = message.text
     level_badge = LEVEL_BADGE.get(message.text, message.text)
 
     db = get_db()
     if not db:
-        bot.send_message(message.chat.id, "❌ Помилка підключення до БД.")
+        wow_done(cid, loader, "❌ Помилка підключення до БД.")
         reset_to_main(message)
         return
     try:
@@ -742,30 +825,26 @@ def user_got_level(message):
             "SELECT id, name, description FROM trainers ORDER BY name"
         ).rows
     except Exception as e:
-        bot.send_message(message.chat.id, f"❌ Помилка: {e}")
+        wow_done(cid, loader, f"❌ Помилка: {e}")
         reset_to_main(message)
         return
 
     if not trainers:
-        bot.send_message(
-            message.chat.id,
-            "😔 Тренерів поки немає. Спробуйте пізніше.",
-            reply_markup=main_menu_markup(message.from_user.id)
-        )
-        user_states.pop(message.chat.id, None)
-        user_form.pop(message.chat.id, None)
+        wow_done(cid, loader,
+                 "😔 Тренерів поки немає. Спробуйте пізніше.",
+                 reply_markup=main_menu_markup(message.from_user.id))
+        user_states.pop(cid, None)
+        user_form.pop(cid, None)
         return
 
-    bot.send_message(
-        message.chat.id,
-        f"✅ *Рівень збережено\\!*\n"
-        f"`{level_badge}`\n\n"
-        f"👇 *Оберіть тренера*\n"
-        f"┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
-        f"Натисніть кнопку під карткою тренера:",
-        parse_mode="MarkdownV2",
-        reply_markup=cancel_only_markup()
-    )
+    wow_done(cid, loader,
+             f"✅ *Рівень збережено\\!*\n"
+             f"`{level_badge}`\n\n"
+             f"👇 *Оберіть тренера*\n"
+             f"┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
+             f"Натисніть кнопку під карткою тренера:",
+             parse_mode="MarkdownV2",
+             reply_markup=cancel_only_markup())
 
     for row in trainers:
         tid_raw  = _unpack_turso_value(row[0])
@@ -830,18 +909,31 @@ def user_picked_trainer(call):
     data["trainer_name"]     = trainer_name
     data["trainer_username"] = trainer_username
 
-    bot.answer_callback_query(call.id, "📨 Заявку надіслано!")
+    # Показуємо "відправляємо..." прямо в картці тренера
+    bot.answer_callback_query(call.id, "📨 Відправляємо заявку...")
+    try:
+        bot.edit_message_text(
+            f"⚙️  _Відправляємо заявку..._",
+            cid, call.message.message_id,
+            parse_mode="Markdown"
+        )
+    except Exception:
+        pass
+    time.sleep(0.8)
 
-    # Повідомлення учню
-    bot.edit_message_text(
-        f"📨 *Заявку надіслано\\!*\n"
-        f"┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
-        f"👨\u200d🏫 Тренер: *{trainer_name}*\n\n"
-        f"⏳ _Очікуйте підтвердження адміністратора\\._\n"
-        f"Ми одразу повідомимо вас\\!",
-        cid, call.message.message_id,
-        parse_mode="MarkdownV2"
-    )
+    # Повідомлення учню — міняємо лоадер на результат
+    try:
+        bot.edit_message_text(
+            f"📨 *Заявку надіслано\\!*\n"
+            f"┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
+            f"👨\u200d🏫 Тренер: *{trainer_name}*\n\n"
+            f"⏳ _Очікуйте підтвердження адміністратора\\._\n"
+            f"Ми одразу повідомимо вас\\!",
+            cid, call.message.message_id,
+            parse_mode="MarkdownV2"
+        )
+    except Exception:
+        pass
     # НЕ видаляємо user_form тут — дані потрібні для підтвердження
     send_main_menu(cid, call.from_user.id, "Ми повідомимо вас!")
 
