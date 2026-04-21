@@ -155,18 +155,19 @@ def init_db() -> bool:
         db.execute("""
             CREATE TABLE IF NOT EXISTS trainers (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                username    TEXT UNIQUE NOT NULL,
+                telegram_id INTEGER UNIQUE,
+                username    TEXT,
                 name        TEXT NOT NULL,
                 description TEXT,
-                telegram_id INTEGER,
                 created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
-        # Додаємо колонку якщо таблиця вже існувала без неї
-        try:
-            db.execute("ALTER TABLE trainers ADD COLUMN telegram_id INTEGER")
-        except Exception:
-            pass  # колонка вже є — ігноруємо
+        # Додаємо колонки якщо таблиця вже існувала без них
+        for col in ["telegram_id INTEGER", "username TEXT"]:
+            try:
+                db.execute(f"ALTER TABLE trainers ADD COLUMN {col}")
+            except Exception:
+                pass
         logger.info("✅ Таблиця trainers готова")
         return True
     except Exception as e:
@@ -480,18 +481,11 @@ def add_trainer_start(message):
     if message.from_user.id != ADMIN_ID:
         return
     trainer_form[message.chat.id] = {}
-    user_states[message.chat.id]  = "add_trainer_pick_user"
+    user_states[message.chat.id]  = "add_trainer_contact"
 
-    # request_users — кнопка відкриває вибір контакту з Telegram
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.add(
-        types.KeyboardButton(
-            "👤 Вказати тренера",
-            request_users=types.KeyboardButtonRequestUsers(
-                request_id=1,
-                user_is_bot=False,
-            )
-        )
+        types.KeyboardButton("📇 Поділитися контактом тренера", request_contact=True)
     )
     markup.add(BTN_CANCEL)
     bot.send_message(
@@ -499,90 +493,87 @@ def add_trainer_start(message):
         "➕ *Додавання тренера*\n"
         "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
         "🔵 Крок 1 з 3  ●○○\n\n"
-        "Натисніть кнопку *«👤 Вказати тренера»*\n"
-        "та оберіть потрібний контакт зі списку\\.\n\n"
-        "_Бот автоматично отримає Telegram ID та @username_",
-        parse_mode="MarkdownV2",
+        "Попросіть тренера надіслати вам свій контакт у Telegram "
+        "(Профіль → Поділитися → через будь-який чат до вас).\n\n"
+        "Потім натисніть кнопку *«📇 Поділитися контактом тренера»* "
+        "і оберіть його зі списку контактів.\n\n"
+        "Бот автоматично отримає Telegram ID та @username — "
+        "саме через них тренер отримуватиме сповіщення.",
+        parse_mode="Markdown",
         reply_markup=markup
     )
 
 
+# Обробник контакту для стану add_trainer_contact
 @bot.message_handler(
-    content_types=["users_shared"],
-    func=lambda m: user_states.get(m.chat.id) == "add_trainer_pick_user"
+    content_types=["contact"],
+    func=lambda m: m.from_user.id == ADMIN_ID
+                   and user_states.get(m.chat.id) == "add_trainer_contact"
 )
-def add_trainer_user_shared(message):
-    cid = message.chat.id
+def add_trainer_contact_received(message):
+    cid     = message.chat.id
+    contact = message.contact
 
-    # users_shared містить список обраних користувачів
-    shared = message.users_shared
-    if not shared or not shared.users:
-        bot.send_message(cid, "❌ Не вдалося отримати дані. Спробуйте ще раз.")
+    tg_id    = contact.user_id   # може бути None для не-TG контактів
+    uname    = (contact.username or "").strip()
+    first    = (contact.first_name or "").strip()
+    last     = (contact.last_name  or "").strip()
+    fullname = f"{first} {last}".strip() or "—"
+
+    if not tg_id:
+        bot.send_message(
+            cid,
+            "⚠️ Цей контакт не є користувачем Telegram.\n"
+            "Будь ласка, попросіть тренера поділитися своїм Telegram-контактом і спробуйте ще раз.",
+            reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True)
+        )
+        # Повертаємо кнопку щоб можна було спробувати знову
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.add(types.KeyboardButton("📇 Поділитися контактом тренера", request_contact=True))
+        markup.add(BTN_CANCEL)
+        bot.send_message(cid, "Спробуйте ще раз:", reply_markup=markup)
         return
 
-    user = shared.users[0]
-    tg_id   = user.user_id
-    uname   = user.username or ""
-    display = f"@{uname}" if uname else f"ID {tg_id}"
-    db_username = uname if uname else str(tg_id)
+    display = f"@{uname}" if uname else f"Telegram ID {tg_id}"
 
     trainer_form[cid].update({
         "telegram_id":      tg_id,
-        "username":         db_username,
+        "username":         uname if uname else None,
         "display_username": display,
+        "prefill_name":     fullname,
     })
     user_states[cid] = "add_trainer_name"
+
     bot.send_message(
         cid,
         f"➕ *Додавання тренера*\n"
         f"┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
         f"🔵 Крок 2 з 3  ●●○\n\n"
-        f"✅ Тренер обраний:\n"
+        f"✅ Контакт отримано:\n"
         f"👤 {display}\n"
         f"🆔 `{tg_id}`\n\n"
-        f"✍️ Введіть повне ім'я тренера\n\n"
-        f"📌 _Приклад:_ `Іван Петренко`",
-        parse_mode="MarkdownV2",
+        f"✍️ Введіть повне ім'я тренера\n"
+        f"_(або надішліть_ `.` _щоб використати ім'я з контакту:_ *{fullname}*_)_",
+        parse_mode="Markdown",
         reply_markup=cancel_only_markup()
     )
 
 
-# Запасний варіант — якщо users_shared не підтримується старим клієнтом
-@bot.message_handler(func=lambda m: user_states.get(m.chat.id) == "add_trainer_username_manual")
-def add_trainer_username_manual(message):
-    cid      = message.chat.id
-    username = message.text.strip() if message.text else ""
-    if not username.startswith("@"):
-        bot.send_message(cid, "❌ Username має починатися з @. Спробуйте ще раз:")
+@bot.message_handler(func=lambda m: user_states.get(m.chat.id) == "add_trainer_name"
+                                    and m.from_user.id == ADMIN_ID)
+def add_trainer_name(message):
+    cid  = message.chat.id
+    text = message.text.strip()
+    # Крапка — використати ім'я з контакту
+    if text == ".":
+        text = trainer_form[cid].get("prefill_name") or "Без імені"
+    if not text:
+        bot.send_message(cid, "❌ Ім'я не може бути порожнім. Введіть ім'я тренера:")
         return
-    uname   = username[1:]
-    display = f"@{uname}"
-    trainer_form[cid].update({
-        "telegram_id":      None,
-        "username":         uname,
-        "display_username": display,
-    })
-    user_states[cid] = "add_trainer_name"
+    trainer_form[cid]["name"] = text
+    user_states[cid] = "add_trainer_description"
     bot.send_message(
         cid,
-        f"➕ *Додавання тренера*\n"
-        f"┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
-        f"🔵 Крок 2 з 3  ●●○\n\n"
-        f"✅ Username збережено: *{display}*\n"
-        f"⚠️ _ID не отримано — сповіщення підуть по @username_\n\n"
-        f"✍️ Введіть повне ім'я тренера\n\n"
-        f"📌 _Приклад:_ `Іван Петренко`",
-        parse_mode="MarkdownV2",
-        reply_markup=cancel_only_markup()
-    )
-
-
-@bot.message_handler(func=lambda m: user_states.get(m.chat.id) == "add_trainer_name")
-def add_trainer_name(message):
-    trainer_form[message.chat.id]["name"] = message.text.strip()
-    user_states[message.chat.id] = "add_trainer_description"
-    bot.send_message(
-        message.chat.id,
         "➕ *Додавання тренера*\n"
         "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
         "🔵 Крок 3 з 3  ●●●\n\n"
@@ -593,7 +584,8 @@ def add_trainer_name(message):
     )
 
 
-@bot.message_handler(func=lambda m: user_states.get(m.chat.id) == "add_trainer_description")
+@bot.message_handler(func=lambda m: user_states.get(m.chat.id) == "add_trainer_description"
+                                    and m.from_user.id == ADMIN_ID)
 def add_trainer_description(message):
     cid  = message.chat.id
     data = trainer_form.get(cid, {})
@@ -607,25 +599,26 @@ def add_trainer_description(message):
         return
     try:
         db.execute(
-            "INSERT INTO trainers (username, name, description, telegram_id) VALUES (?, ?, ?, ?)",
-            [data["username"], data["name"], data["description"], data.get("telegram_id")]
+            "INSERT INTO trainers (telegram_id, username, name, description) VALUES (?, ?, ?, ?)",
+            [data.get("telegram_id"), data.get("username"), data["name"], data["description"]]
         )
-        wow_done(cid, loader,
-                 f"✅ *Тренер доданий\\!*\n"
-                 f"┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
-                 f"👨\u200d🏫 *{data['name']}*\n"
-                 f"📎 {data['display_username']}\n\n"
-                 f"_Тренер з'явиться у списку одразу\\._",
-                 parse_mode="MarkdownV2",
-                 reply_markup=admin_menu_markup())
-        logger.info(f"✅ Додано тренера: {data['name']}")
+        wow_done(
+            cid, loader,
+            f"✅ *Тренер доданий!*\n"
+            f"┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
+            f"👨‍🏫 {data['name']}\n"
+            f"📎 {data['display_username']}\n\n"
+            f"Тренер з'явиться у списку одразу.",
+            reply_markup=admin_menu_markup()
+        )
+        logger.info(f"✅ Додано тренера: {data['name']} tg_id={data.get('telegram_id')}")
     except Exception as e:
         if "unique" in str(e).lower() or "constraint" in str(e).lower():
             wow_done(cid, loader,
                      f"⚠️ Тренер {data['display_username']} вже існує в базі.",
                      reply_markup=admin_menu_markup())
         else:
-            wow_done(cid, loader, f"❌ Помилка: {e}", reply_markup=admin_menu_markup())
+            wow_done(cid, loader, f"❌ Помилка збереження: {e}", reply_markup=admin_menu_markup())
     user_states.pop(cid, None)
     trainer_form.pop(cid, None)
 
