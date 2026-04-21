@@ -158,9 +158,15 @@ def init_db() -> bool:
                 username    TEXT UNIQUE NOT NULL,
                 name        TEXT NOT NULL,
                 description TEXT,
+                telegram_id INTEGER,
                 created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Додаємо колонку якщо таблиця вже існувала без неї
+        try:
+            db.execute("ALTER TABLE trainers ADD COLUMN telegram_id INTEGER")
+        except Exception:
+            pass  # колонка вже є — ігноруємо
         logger.info("✅ Таблиця trainers готова")
         return True
     except Exception as e:
@@ -474,34 +480,51 @@ def add_trainer_start(message):
     if message.from_user.id != ADMIN_ID:
         return
     trainer_form[message.chat.id] = {}
-    user_states[message.chat.id]  = "add_trainer_username"
+    user_states[message.chat.id]  = "add_trainer_contact"
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add(types.KeyboardButton("📇 Поділитися контактом тренера", request_contact=True))
+    markup.add(BTN_CANCEL)
     bot.send_message(
         message.chat.id,
         "➕ *Додавання тренера*\n"
         "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
         "🔵 Крок 1 з 3  ●○○\n\n"
-        "Введіть @username тренера у Telegram\n\n"
-        "📌 _Приклад:_ `@chess_coach_ivan`",
-        parse_mode="Markdown",
-        reply_markup=cancel_only_markup()
+        "📇 Натисніть кнопку нижче, щоб передати контакт тренера\\.\n\n"
+        "_Бот автоматично отримає Telegram ID та @username тренера — "
+        "вони будуть використані для надсилання сповіщень\\._",
+        parse_mode="MarkdownV2",
+        reply_markup=markup
     )
 
 
-@bot.message_handler(func=lambda m: user_states.get(m.chat.id) == "add_trainer_username")
-def add_trainer_username(message):
-    username = message.text.strip()
-    if not username.startswith("@"):
-        bot.send_message(message.chat.id, "❌ Username має починатися з @. Спробуйте ще раз:")
-        return
-    trainer_form[message.chat.id].update({"username": username[1:], "display_username": username})
-    user_states[message.chat.id] = "add_trainer_name"
+@bot.message_handler(
+    content_types=["contact"],
+    func=lambda m: user_states.get(m.chat.id) == "add_trainer_contact"
+)
+def add_trainer_contact(message):
+    cid     = message.chat.id
+    contact = message.contact
+    tg_id   = contact.user_id      # Telegram user_id тренера
+    uname   = contact.username or ""
+    # Формуємо display_username: якщо є — показуємо @username, інакше — ID
+    display = f"@{uname}" if uname else f"ID {tg_id}"
+    # Для поля username в БД використовуємо username або рядок з id
+    db_username = uname if uname else str(tg_id)
+
+    trainer_form[cid].update({
+        "telegram_id":      tg_id,
+        "username":         db_username,
+        "display_username": display,
+    })
+    user_states[cid] = "add_trainer_name"
     bot.send_message(
-        message.chat.id,
-        "➕ *Додавання тренера*\n"
-        "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
-        "🔵 Крок 2 з 3  ●●○\n\n"
-        "Введіть повне ім'я тренера\n\n"
-        "📌 _Приклад:_ `Іван Петренко`",
+        cid,
+        f"➕ *Додавання тренера*\n"
+        f"┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
+        f"🔵 Крок 2 з 3  ●●○\n\n"
+        f"✅ Контакт отримано: *{display}*\n\n"
+        f"✍️ Введіть повне ім'я тренера\n\n"
+        f"📌 _Приклад:_ `Іван Петренко`",
         parse_mode="Markdown",
         reply_markup=cancel_only_markup()
     )
@@ -537,8 +560,8 @@ def add_trainer_description(message):
         return
     try:
         db.execute(
-            "INSERT INTO trainers (username, name, description) VALUES (?, ?, ?)",
-            [data["username"], data["name"], data["description"]]
+            "INSERT INTO trainers (username, name, description, telegram_id) VALUES (?, ?, ?, ?)",
+            [data["username"], data["name"], data["description"], data.get("telegram_id")]
         )
         wow_done(cid, loader,
                  f"✅ *Тренер доданий\\!*\n"
@@ -751,20 +774,42 @@ def list_trainers(message):
 # ==========================================================
 @bot.message_handler(func=lambda m: m.text == "♟️ Вибрати тренера")
 def choose_trainer_start(message):
-    cid    = message.chat.id
+    cid = message.chat.id
     loader = wow_action(cid, "load")
-    user_states[cid] = "user_waiting_phone"
+    user_states[cid] = "user_waiting_age_type"
+    user_form[cid]   = {}
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.add(types.KeyboardButton("📱 Поділитися номером", request_contact=True))
+    markup.row("🧑 Дорослий", "👦 Дитина")
     markup.add(BTN_CANCEL)
     wow_done(cid, loader,
              "♟️ *Запис до тренера*\n"
              "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
-             "🔵 Крок 1 з 3  ●○○\n\n"
-             "📱 Поділіться вашим номером телефону\n\n"
-             "_Натисніть кнопку нижче — це безпечно і потрібно для зв'язку з тренером_",
+             "🔵 Крок 1 з 6  ●○○○○○\n\n"
+             "👤 Для кого записуєтесь?",
              parse_mode="Markdown",
              reply_markup=markup)
+
+
+@bot.message_handler(func=lambda m: user_states.get(m.chat.id) == "user_waiting_age_type")
+def user_got_age_type(message):
+    if message.text not in {"🧑 Дорослий", "👦 Дитина"}:
+        bot.send_message(message.chat.id, "Оберіть варіант із кнопок нижче.")
+        return
+    cid = message.chat.id
+    user_form[cid]["age_type"] = message.text
+    user_states[cid] = "user_waiting_phone"
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add(types.KeyboardButton("📱 Поділитися номером", request_contact=True))
+    markup.add(BTN_CANCEL)
+    bot.send_message(
+        cid,
+        "♟️ *Запис до тренера*\n"
+        "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
+        "🔵 Крок 2 з 6  ●●○○○○\n\n"
+        "📱 Поділіться вашим номером телефону\n\n"
+        "_Натисніть кнопку нижче — це безпечно і потрібно для зв'язку з тренером_",
+        parse_mode="Markdown",
+        reply_markup=markup)
 
 
 @bot.message_handler(content_types=["contact"])
@@ -773,16 +818,38 @@ def user_got_phone(message):
         return
     cid    = message.chat.id
     loader = wow_action(cid, "check")
-    user_form[cid] = {"phone": message.contact.phone_number}
-    user_states[cid] = "user_waiting_name"
+    user_form[cid]["phone"] = message.contact.phone_number
+    user_states[cid] = "user_waiting_lesson_type"
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.row("👥 Групове заняття", "👤 Індивідуальне заняття")
+    markup.add(BTN_CANCEL)
     wow_done(cid, loader,
              "♟️ *Запис до тренера*\n"
              "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
-             "🔵 Крок 2 з 3  ●●○\n\n"
+             "🔵 Крок 3 з 6  ●●●○○○\n\n"
              "✅ Номер збережено\\!\n\n"
-             "✍️ Введіть ваше ім'я та прізвище",
+             "📚 Який формат занять вас цікавить?",
              parse_mode="MarkdownV2",
-             reply_markup=cancel_only_markup())
+             reply_markup=markup)
+
+
+@bot.message_handler(func=lambda m: user_states.get(m.chat.id) == "user_waiting_lesson_type")
+def user_got_lesson_type(message):
+    if message.text not in {"👥 Групове заняття", "👤 Індивідуальне заняття"}:
+        bot.send_message(message.chat.id, "Оберіть варіант із кнопок нижче.")
+        return
+    cid = message.chat.id
+    user_form[cid]["lesson_type"] = message.text
+    user_states[cid] = "user_waiting_name"
+    bot.send_message(
+        cid,
+        "♟️ *Запис до тренера*\n"
+        "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
+        "🔵 Крок 4 з 6  ●●●●○○\n\n"
+        "✍️ Введіть ваше ім'я та прізвище",
+        parse_mode="Markdown",
+        reply_markup=cancel_only_markup()
+    )
 
 
 @bot.message_handler(func=lambda m: user_states.get(m.chat.id) == "user_waiting_name")
@@ -798,7 +865,7 @@ def user_got_name(message):
     wow_done(cid, loader,
              "♟️ *Запис до тренера*\n"
              "┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
-             "🔵 Крок 3 з 3  ●●●\n\n"
+             "🔵 Крок 5 з 6  ●●●●●○\n\n"
              "♟️ Оберіть ваш рівень гри в шахи:",
              parse_mode="Markdown",
              reply_markup=markup)
@@ -840,6 +907,7 @@ def user_got_level(message):
     wow_done(cid, loader,
              f"✅ *Рівень збережено\\!*\n"
              f"`{level_badge}`\n\n"
+             f"🔵 Крок 6 з 6  ●●●●●●\n\n"
              f"👇 *Оберіть тренера*\n"
              f"┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
              f"Натисніть кнопку під карткою тренера:",
@@ -894,12 +962,13 @@ def user_picked_trainer(call):
         bot.answer_callback_query(call.id, "❌ Помилка БД", show_alert=True)
         return
     try:
-        result = db.execute("SELECT username, name FROM trainers WHERE id = ?", [tid]).rows
+        result = db.execute("SELECT username, name, telegram_id FROM trainers WHERE id = ?", [tid]).rows
         if not result:
             bot.answer_callback_query(call.id, "❌ Тренер не знайдений", show_alert=True)
             return
         trainer_username = str(_unpack_turso_value(result[0][0]))
         trainer_name     = str(_unpack_turso_value(result[0][1]))
+        trainer_tg_id    = _unpack_turso_value(result[0][2])  # може бути None якщо не збережено
     except Exception as e:
         bot.answer_callback_query(call.id, f"❌ {str(e)[:50]}", show_alert=True)
         return
@@ -908,6 +977,7 @@ def user_picked_trainer(call):
     data["trainer_id"]       = tid
     data["trainer_name"]     = trainer_name
     data["trainer_username"] = trainer_username
+    data["trainer_tg_id"]    = trainer_tg_id
 
     # Показуємо "відправляємо..." прямо в картці тренера
     bot.answer_callback_query(call.id, "📨 Відправляємо заявку...")
@@ -939,19 +1009,32 @@ def user_picked_trainer(call):
 
     # Попереднє повідомлення тренеру
     level_badge = LEVEL_BADGE.get(data['level'], data['level'])
+    lesson_type = data.get('lesson_type', '—')
+    age_type    = data.get('age_type', '—')
     trainer_msg = (
         f"📬 *Новий запит на заняття\\!*\n"
         f"┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
         f"👤 Учень: *{data['name']}*\n"
         f"📱 `{data['phone']}`\n"
+        f"🧒 {age_type}  │  📚 {lesson_type}\n"
         f"♟️ `{level_badge}`\n\n"
         f"_Очікуйте підтвердження від адміністратора\\._"
     )
-    try:
-        bot.send_message(f"@{trainer_username}", trainer_msg, parse_mode="MarkdownV2")
-        logger.info(f"📨 Попередження тренеру @{trainer_username} надіслано")
-    except Exception as e:
-        logger.warning(f"⚠️ Не вдалося надіслати тренеру @{trainer_username}: {e}")
+    # Надсилаємо тренеру: спочатку за telegram_id, якщо є — це надійніше
+    trainer_notified = False
+    if trainer_tg_id:
+        try:
+            bot.send_message(int(trainer_tg_id), trainer_msg, parse_mode="MarkdownV2")
+            logger.info(f"📨 Попередження тренеру ID={trainer_tg_id} надіслано")
+            trainer_notified = True
+        except Exception as e:
+            logger.warning(f"⚠️ Не вдалося надіслати тренеру ID={trainer_tg_id}: {e}")
+    if not trainer_notified and trainer_username:
+        try:
+            bot.send_message(f"@{trainer_username}", trainer_msg, parse_mode="MarkdownV2")
+            logger.info(f"📨 Попередження тренеру @{trainer_username} надіслано (fallback)")
+        except Exception as e:
+            logger.warning(f"⚠️ Не вдалося надіслати тренеру @{trainer_username}: {e}")
 
     # Повідомлення адміністратору з кнопками підтвердження
     user_tg   = f"@{call.from_user.username}" if call.from_user.username else f"ID {cid}"
@@ -960,6 +1043,7 @@ def user_picked_trainer(call):
         f"┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
         f"👤 *{data['name']}* \\({user_tg}\\)\n"
         f"📱 `{data['phone']}`\n"
+        f"🧒 {data.get('age_type','—')}  │  📚 {data.get('lesson_type','—')}\n"
         f"♟️ `{level_badge}`\n\n"
         f"👨\u200d🏫 Тренер: *{trainer_name}* \\(@{trainer_username}\\)\n"
         f"┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
@@ -1001,10 +1085,13 @@ def admin_confirm_enroll(call):
 
     trainer_name     = data.get("trainer_name", "тренера")
     trainer_username = data.get("trainer_username")
+    trainer_tg_id    = data.get("trainer_tg_id")
     user_name        = data.get("name", "учня")
     user_phone       = data.get("phone", "—")
     user_level       = data.get("level", "—")
     user_level_badge = LEVEL_BADGE.get(user_level, user_level)
+    age_type         = data.get("age_type", "—")
+    lesson_type      = data.get("lesson_type", "—")
 
     bot.answer_callback_query(call.id, "✅ Запис підтверджено!")
 
@@ -1034,18 +1121,27 @@ def admin_confirm_enroll(call):
         logger.warning(f"Не вдалося надіслати учню {user_cid}: {e}")
 
     # Повідомлення тренеру
-    if trainer_username:
+    confirm_trainer_msg = (
+        f"✅ *Адмін підтвердив запис\\!*\n"
+        f"┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
+        f"До вас записався новий учень:\n"
+        f"👤 *{user_name}*\n"
+        f"📱 `{user_phone}`\n"
+        f"🧒 {age_type}  │  📚 {lesson_type}\n"
+        f"♟️ `{user_level_badge}`\n\n"
+        f"_Зв'яжіться з учнем для організації занять\\!_"
+    )
+    trainer_notified = False
+    if trainer_tg_id:
+        try:
+            bot.send_message(int(trainer_tg_id), confirm_trainer_msg, parse_mode="MarkdownV2")
+            trainer_notified = True
+        except Exception as e:
+            logger.warning(f"Не вдалося надіслати тренеру ID={trainer_tg_id}: {e}")
+    if not trainer_notified and trainer_username:
         try:
             bot.send_message(
-                f"@{trainer_username}",
-                f"✅ *Адмін підтвердив запис\\!*\n"
-                f"┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
-                f"До вас записався новий учень:\n"
-                f"👤 *{user_name}*\n"
-                f"📱 `{user_phone}`\n"
-                f"♟️ `{user_level_badge}`\n\n"
-                f"_Зв'яжіться з учнем для організації занять\\!_",
-                parse_mode="MarkdownV2"
+                f"@{trainer_username}", confirm_trainer_msg, parse_mode="MarkdownV2"
             )
         except Exception as e:
             logger.warning(f"Не вдалося надіслати тренеру @{trainer_username}: {e}")
