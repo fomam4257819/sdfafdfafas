@@ -340,13 +340,13 @@ def reset_to_main(message):
 
 
 def format_trainer_card(name: str, username: str, desc: str, index: int = None) -> str:
-    num       = f"*{index}* " if index else ""
+    num       = f"{index}. " if index else ""
     desc_text = desc if desc else "Опис не вказано"
     return (
-        f"{num}👨\u200d🏫 *{name}*\n"
+        f"{num}👨‍🏫 {name}\n"
         f"╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\n"
         f"📎 @{username}\n"
-        f"📝 _{safe_desc}_"
+        f"📝 {desc_text}"
     )
 
 
@@ -409,7 +409,7 @@ def show_our_trainers(message):
     wow_done(cid, loader,
              f"👨\u200d🏫 *Наші тренери*\n"
              f"┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
-             f"Знайдено фахівців: *{len(trainers)}*",
+             f"Знайдено фахівців: {len(trainers)}",
              parse_mode="Markdown")
     for i, row in enumerate(trainers, 1):
         name  = _unpack_turso_value(row[1])
@@ -419,7 +419,7 @@ def show_our_trainers(message):
         uname = str(uname) if uname else "no_username"
         desc  = str(desc)  if desc  else "Опис не вказано"
         card  = format_trainer_card(name, uname, desc, index=i)
-        bot.send_message(cid, card, parse_mode="Markdown")
+        bot.send_message(cid, card)
 
     bot.send_message(
         cid,
@@ -813,8 +813,8 @@ def list_trainers(message):
     wow_done(cid, loader,
              f"📋 *Тренери в базі*\n"
              f"┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
-             f"Знайдено: *{len(trainers)}* чол\\.",
-             parse_mode="MarkdownV2")
+             f"Знайдено: {len(trainers)} чол.",
+             )
     for i, row in enumerate(trainers, 1):
         name  = _unpack_turso_value(row[1])
         uname = _unpack_turso_value(row[2])
@@ -823,7 +823,7 @@ def list_trainers(message):
         uname = str(uname) if uname else "no_username"
         desc  = str(desc)  if desc  else "Опис не вказано"
         card  = format_trainer_card(name, uname, desc, index=i)
-        bot.send_message(message.chat.id, card, parse_mode="Markdown")
+        bot.send_message(message.chat.id, card)
 
 
 # ==========================================================
@@ -991,7 +991,7 @@ def user_got_level(message):
         pick_markup.add(
             types.InlineKeyboardButton("📚 Записатися на курс", callback_data=f"pick_{tid}")
         )
-        bot.send_message(message.chat.id, card, parse_mode="Markdown", reply_markup=pick_markup)
+        bot.send_message(message.chat.id, card, reply_markup=pick_markup)
 
     user_states[message.chat.id] = "user_picking_trainer"
 
