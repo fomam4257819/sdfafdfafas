@@ -64,9 +64,11 @@ class QueryResult:
             return
         first = rows[0]
         if isinstance(first, dict) and "values" in first:
+            # Стандартний Turso v2 формат: [{type, value}, ...]
             self.rows = [tuple(_unpack_turso_value(v) for v in r.get("values", [])) for r in rows]
         elif isinstance(first, dict):
-            self.rows = [tuple(r.values()) for r in rows]
+            # Плоский dict — розпакуємо значення на всяк випадок
+            self.rows = [tuple(_unpack_turso_value(v) for v in r.values()) for r in rows]
         else:
             self.rows = [tuple(r) if not isinstance(r, tuple) else r for r in rows]
 
@@ -95,7 +97,8 @@ class TursoClient:
         if resp.status_code != 200:
             raise Exception(f"HTTP {resp.status_code}: {resp.text[:300]}")
 
-        data    = resp.json() 
+        data    = resp.json()
+        logger.info(f"🔍 Turso raw response keys: {list(data.keys()) if isinstance(data, dict) else type(data)}")
         results = data.get("results", [])
         if not results:
             return QueryResult([])
@@ -111,7 +114,7 @@ class TursoClient:
         if rows is None and isinstance(response_obj, dict):
             rows = response_obj.get("rows")
 
-        logger.info(f"✅ SQL OK — {len(rows) if rows else 0} rows")
+        logger.info(f"✅ SQL OK — {len(rows) if rows else 0} rows | first_row_sample={rows[0] if rows else 'empty'}")
         return QueryResult(rows or [])
 
 
@@ -144,7 +147,7 @@ def get_db(retry: int = 0) -> TursoClient:
         return _client
     except Exception:
         _client = None
-        return get_db(retry)
+        return get_db(retry + 1)
 
 
 def init_db() -> bool:
@@ -477,7 +480,7 @@ def add_trainer_start(message):
 
 # Універсальний обробник: ловить і натискання кнопки, і переслані повідомлення, і контакти
 @bot.message_handler(
-    content_types=["user_shared", "contact", "text", "forwarded_message"],
+    content_types=["user_shared", "contact", "text"],
     func=lambda m: m.from_user.id == ADMIN_ID and user_states.get(m.chat.id) == "add_trainer_contact"
 )
 def add_trainer_id_received(message):
@@ -587,7 +590,13 @@ def add_trainer_name(message):
                                     and m.from_user.id == ADMIN_ID)
 def add_trainer_description(message):
     cid  = message.chat.id
-    data = trainer_form.get(cid, {})
+    data = trainer_form.get(cid)
+    if not data or "name" not in data:
+        bot.send_message(cid, "❌ Помилка: сесія застаріла. Почніть додавання заново.",
+                         reply_markup=admin_menu_markup())
+        user_states.pop(cid, None)
+        trainer_form.pop(cid, None)
+        return
     data["description"] = message.text.strip()
     loader = wow_action(cid, "save")
     db = get_db()
@@ -1394,8 +1403,9 @@ def debug_db():
             {"type": "execute", "stmt": {"sql": "SELECT id, name, username, description FROM trainers"}},
             {"type": "close"}
         ]}
+        _debug_url = TURSO_URL.replace("libsql://", "https://", 1).rstrip("/")
         raw  = requests.post(
-            f"{TURSO_URL}/v2/pipeline", json=payload,
+            f"{_debug_url}/v2/pipeline", json=payload,
             headers={"Authorization": f"Bearer {TURSO_TOKEN}", "Content-Type": "application/json"},
             timeout=10
         )
