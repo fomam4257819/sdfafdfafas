@@ -190,6 +190,16 @@ ADMIN_RESERVED = {
     "➕ Додати тренера", "➖ Видалити тренера", "📋 Список тренерів",
 }
 
+def escape_md(text) -> str:
+    """Екранує всі спеціальні символи MarkdownV2 (включаючи _)."""
+    if not text:
+        return ""
+    text = str(text)
+    for ch in ['_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!']:
+        text = text.replace(ch, '\\' + ch)
+    return text
+
+
 
 # ==========================================================
 # 🏅  БЕЙДЖІ РІВНІВ — красиве відображення рівня гравця
@@ -336,7 +346,7 @@ def format_trainer_card(name: str, username: str, desc: str, index: int = None) 
         f"{num}👨\u200d🏫 *{name}*\n"
         f"╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\n"
         f"📎 @{username}\n"
-        f"📝 _{desc_text}_"
+        f"📝 _{safe_desc}_"
     )
 
 
@@ -712,7 +722,7 @@ def delete_trainer_handler(call):
         f"🗑 *Видалення тренера*\n"
         f"╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\n"
         f"👨\u200d🏫 *{name}*\n"
-        f"📎 @{uname}\n\n"
+        f"📎 @{escape_md(uname)}\n\n"
         f"⚠️ Ви впевнені\\? Це незворотня дія\\.",
         call.message.chat.id,
         call.message.message_id,
@@ -755,7 +765,7 @@ def confirm_delete_trainer(call):
         bot.edit_message_text(
             f"✅ *Готово\\!*\n"
             f"╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌\n"
-            f"Тренер *{name}* видалений з бази\\.",
+            f"Тренер *{escape_md(name)}* видалений з бази\\.",
             call.message.chat.id, call.message.message_id,
             parse_mode="MarkdownV2"
         )
@@ -1040,7 +1050,7 @@ def user_picked_trainer(call):
         bot.edit_message_text(
             f"📨 *Заявку надіслано\\!*\n"
             f"┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
-            f"👨\u200d🏫 Тренер: *{trainer_name}*\n\n"
+            f"👨\u200d🏫 Тренер: *{escape_md(trainer_name)}*\n\n"
             f"⏳ _Очікуйте підтвердження адміністратора\\._\n"
             f"Ми одразу повідомимо вас\\!",
             cid, call.message.message_id,
@@ -1056,7 +1066,7 @@ def user_picked_trainer(call):
     trainer_msg = (
         f"📬 *Новий запит на заняття\\!*\n"
         f"┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
-        f"👤 Учень: *{data['name']}*\n"
+        f"👤 Учень: *{escape_md(data['name'])}*\n"
         f"📱 `{data['phone']}`\n"
         f"🧒 {age_type}  │  📚 {lesson_type}\n"
         f"♟️ `{level_badge}`\n\n"
@@ -1080,11 +1090,11 @@ def user_picked_trainer(call):
     admin_msg = (
         f"📋 *Новий запис до тренера\\!*\n"
         f"┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
-        f"👤 *{data['name']}* \\({user_tg}\\)\n"
+        f"👤 *{escape_md(data['name'])}* \\({escape_md(user_tg)}\\)\n"
         f"📱 `{data['phone']}`\n"
         f"🧒 {data.get('age_type','—')}  │  📚 {data.get('lesson_type','—')}\n"
         f"♟️ `{level_badge}`\n\n"
-        f"👨\u200d🏫 Тренер: *{trainer_name}* \\(@{trainer_username}\\)\n"
+        f"👨\u200d🏫 Тренер: *{escape_md(trainer_name)}* \\(@{escape_md(trainer_username)}\\)\n"
         f"┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
         f"Підтвердіть або відхиліть запис:"
     )
@@ -1147,7 +1157,7 @@ def admin_confirm_enroll(call):
             user_cid,
             f"🎉 *Запис підтверджено\\!*\n"
             f"┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
-            f"👨\u200d🏫 Тренер: *{trainer_name}*\n\n"
+            f"👨\u200d🏫 Тренер: *{escape_md(trainer_name)}*\n\n"
             f"⏳ Адміністратор незабаром зв'яжеться з вами\n"
             f"для узгодження деталей занять\\.\n\n"
             f"_Дякуємо за довіру\\! Бажаємо успіхів\\! ♟️_",
@@ -1160,7 +1170,7 @@ def admin_confirm_enroll(call):
         f"✅ *Адмін підтвердив запис\\!*\n"
         f"┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
         f"До вас записався новий учень:\n"
-        f"👤 *{user_name}*\n"
+        f"👤 *{escape_md(user_name)}*\n"
         f"📱 `{user_phone}`\n"
         f"🧒 {age_type}  │  📚 {lesson_type}\n"
         f"♟️ `{user_level_badge}`\n\n"
@@ -1252,8 +1262,8 @@ def admin_write_reject_reason(message):
             user_cid,
             f"😔 *Запис відхилено*\n"
             f"┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄\n"
-            f"👨\u200d🏫 Тренер: *{trainer_name}*\n\n"
-            f"📝 *Причина:*\n{reason}\n\n"
+            f"👨\u200d🏫 Тренер: *{escape_md(trainer_name)}*\n\n"
+            f"📝 *Причина:*\n{escape_md(reason)}\n\n"
             f"_Спробуйте обрати іншого тренера або зверніться до адміністратора\\._",
             parse_mode="MarkdownV2",
             reply_markup=main_menu_markup(user_cid)
